@@ -34,7 +34,7 @@ import {
   type WorkBuddyPoolCredential,
 } from '../src/account-pool.ts'
 import { WorkBuddyPoolCredentialResolver, type WorkBuddyCredentialSource } from '../src/pool-store.ts'
-import { collectAccounts } from '../src/pool-cli.ts'
+import { collectAccounts, partitionByRegion } from '../src/pool-cli.ts'
 import { WorkBuddyUpstreamClient } from '../src/upstream.ts'
 import { WorkBuddyCredentialStore } from '../src/auth.ts'
 import { WorkBuddyCatalog } from '../src/catalog.ts'
@@ -632,6 +632,38 @@ describe('shim integration: a dead session rotates the pool', () => {
   })
 })
 
+describe('region isolation on import', () => {
+  /**
+   * The two desktop apps share one auth directory and differ only by filename, so
+   * pointing `import` at that directory — the natural thing to do, and the only
+   * way to reach the timestamped per-account backups — hands a mixed batch to
+   * whichever pool is being filled. A CN token sent to the international endpoint
+   * leaks one product's credential to the other, which is what the single-account
+   * store already refuses to do.
+   */
+  it('keeps only the credentials belonging to the pool\'s own product', () => {
+    const cnAccount = { ...credential('uid-cn', 'AT-CN'), domain: 'www.codebuddy.cn' }
+    const globalAccount = { ...credential('uid-global', 'AT-GLOBAL'), domain: 'www.workbuddy.ai' }
+
+    const forAi = partitionByRegion([cnAccount, globalAccount], { region: 'global' } as never)
+    expect(forAi.accepted.map(a => a.uid)).toEqual(['uid-global'])
+    expect(forAi.rejected.map(a => a.uid)).toEqual(['uid-cn'])
+
+    const forCn = partitionByRegion([cnAccount, globalAccount], { region: 'cn' } as never)
+    expect(forCn.accepted.map(a => a.uid)).toEqual(['uid-cn'])
+    expect(forCn.rejected.map(a => a.uid)).toEqual(['uid-global'])
+  })
+
+  it('treats an empty domain as CN, matching the credential store', () => {
+    // `regionOf` answers `cn` for an empty domain, and the pool must agree: a
+    // credential with no domain that landed in the international pool would be
+    // sent to the international endpoint.
+    const noDomain = { ...credential('uid-nodomain', 'AT-NODOMAIN'), domain: '' }
+    expect(partitionByRegion([noDomain], { region: 'cn' } as never).accepted).toHaveLength(1)
+    expect(partitionByRegion([noDomain], { region: 'global' } as never).rejected).toHaveLength(1)
+  })
+})
+
 describe('importing an encrypted desktop credential', () => {
   /**
    * The path a real user takes.
@@ -792,6 +824,22 @@ describe('WorkBuddyUpstreamClient.dailyCheckin', () => {
   it('reports a 401 as auth', async () => {
     stubFetch(() => ({ status: 401, body: { code: 401, msg: 'unauthorized' } }))
     expect((await new WorkBuddyUpstreamClient().dailyCheckin(cn('AT'))).status).toBe('auth')
+  })
+
+  it('reads a 4xx "no check-in here" answer as already, not as a failure', async () => {
+    // Measured on 2026-10-11: the international product has no daily check-in
+    // and answers a claim with HTTP 400 `签到活动未开启或已过期`. Reading that as
+    // a failure would mark every international account broken on every run, when
+    // the truth is that there is nothing to claim.
+    stubFetch(() => ({ status: 400, body: { code: 400, msg: '签到活动未开启或已过期' } }))
+    const outcome = await new WorkBuddyUpstreamClient().dailyCheckin(global('AT'))
+    expect(outcome.status).toBe('already')
+    expect(outcome.detail).toContain('签到活动未开启')
+  })
+
+  it('still reports a genuine 4xx failure as failed', async () => {
+    stubFetch(() => ({ status: 400, body: { code: 400, msg: '参数错误' } }))
+    expect((await new WorkBuddyUpstreamClient().dailyCheckin(global('AT'))).status).toBe('failed')
   })
 
   it('reports a transport failure as failed, never as already', async () => {

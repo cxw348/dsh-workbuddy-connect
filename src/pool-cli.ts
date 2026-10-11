@@ -15,7 +15,7 @@
 
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { extname, join, resolve } from 'node:path'
+import { basename, extname, join, resolve } from 'node:path'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import {
   parseImportText,
@@ -34,7 +34,7 @@ import {
   type WorkBuddyAtRestKeyProvider,
 } from './desktop-credential-protection.ts'
 import { CN_VARIANT, variantFor, WORKBUDDY_VARIANTS, type WorkBuddyVariant } from './variants.ts'
-import { WorkBuddyUpstreamClient } from './upstream.ts'
+import { regionOf, WorkBuddyUpstreamClient } from './upstream.ts'
 
 /** Pool subcommands, so the CLI can dispatch on its first argument. */
 export const POOL_ACTIONS: ReadonlySet<string> = new Set([
@@ -48,8 +48,16 @@ export const POOL_ACTIONS: ReadonlySet<string> = new Set([
   'use',
 ])
 
-/** Import file extensions this reader will open when given a directory. */
-const IMPORT_EXTENSIONS: ReadonlySet<string> = new Set(['.json', '.jsonl', '.ndjson', '.txt', '.auth'])
+/**
+ * Import file extensions this reader will open when given a directory.
+ *
+ * `.info` is the one that matters in practice: it is what the WorkBuddy desktop
+ * app names every credential file, including the timestamped backups it leaves
+ * on each sign-in and account switch. Leaving it out made a directory import
+ * scan past every real credential and report "no account document found" — the
+ * difference between the feature working on the user's actual machine and not.
+ */
+const IMPORT_EXTENSIONS: ReadonlySet<string> = new Set(['.json', '.jsonl', '.ndjson', '.txt', '.auth', '.info'])
 
 /** A stable, non-reversible digest used for anonymous pool keys. */
 export function tokenHash(seed: string): string {
@@ -160,6 +168,54 @@ async function readImportFile(
 }
 
 /**
+ * Keep only the credentials that belong to this variant's region.
+ *
+ * The two desktop apps share one auth directory and differ only by filename, so
+ * pointing `import` at that directory — the natural thing to do, and the only
+ * way to find the timestamped per-account backups — hands a mixed batch to
+ * whichever pool is being filled. A CN token sent to the international endpoint
+ * (or the reverse) leaks one product's credential to the other, which is exactly
+ * what the single-account store already refuses to do.
+ *
+ * Rejecting at import time is the only place this can be caught usefully: the
+ * alternative is a pool that looks populated and fails every request from the
+ * mismatched accounts.
+ */
+export function partitionByRegion(
+  accounts: readonly WorkBuddyPoolCredential[],
+  variant: WorkBuddyVariant,
+): { accepted: WorkBuddyPoolCredential[], rejected: WorkBuddyPoolCredential[] } {
+  const accepted: WorkBuddyPoolCredential[] = []
+  const rejected: WorkBuddyPoolCredential[] = []
+  for (const account of accounts) {
+    if (regionOf(account.domain) === variant.region) accepted.push(account)
+    else rejected.push(account)
+  }
+  return { accepted, rejected }
+}
+
+/**
+ * Whether a filename belongs to the *other* product's credential family.
+ *
+ * Used to skip before decryption rather than after, and that ordering matters for
+ * two reasons beyond tidiness: opening a credential spawns the product's Electron
+ * to fetch its at-rest key, so decrypting a file this pool can never use is a
+ * wasted process launch per file; and the other product's key does not open these
+ * files at all, so the attempt fails and reports an unlock error for a file that
+ * was never this pool's business.
+ *
+ * The two families are distinguishable by name alone — the desktop app writes
+ * `workbuddy-desktop*.info` for CN and `workbuddy-desktop-ai*.info` for the
+ * international product, with the same timestamped suffixes on backups.
+ */
+export function belongsToOtherProduct(file: string, variant: WorkBuddyVariant): boolean {
+  const name = basename(file)
+  if (!name.startsWith('workbuddy-desktop')) return false
+  const isInternationalFile = name.startsWith('workbuddy-desktop-ai')
+  return variant.region === 'cn' ? isInternationalFile : !isInternationalFile
+}
+
+/**
  * Read and parse every import file, returning the accounts found.
  *
  * A file that yields zero accounts is an error rather than a silent no-op: the
@@ -169,6 +225,7 @@ async function readImportFile(
 export async function collectAccounts(
   files: readonly string[],
   keyProvider?: WorkBuddyAtRestKeyProvider,
+  variant?: WorkBuddyVariant,
 ): Promise<{
   accounts: WorkBuddyPoolCredential[]
   errors: { path: string; reason: string }[]
@@ -178,6 +235,9 @@ export async function collectAccounts(
   const errors: { path: string; reason: string }[] = []
   const perFile: { path: string; accounts: number; skippedLines?: number; encrypted?: boolean }[] = []
   for (const file of files) {
+    // The other product's credential family is skipped before any decryption
+    // attempt: see `belongsToOtherProduct`.
+    if (variant !== undefined && belongsToOtherProduct(file, variant)) continue
     let text: string
     let encrypted = false
     try {
@@ -260,6 +320,7 @@ export async function commandImport(
   pool: WorkBuddyAccountPool,
   inputs: readonly string[],
   options: PoolOptions,
+  variant: WorkBuddyVariant,
   keyProvider?: WorkBuddyAtRestKeyProvider,
 ): Promise<number> {
   if (inputs.length === 0) {
@@ -267,14 +328,23 @@ export async function commandImport(
     return 1
   }
   const expanded = expandImportPaths(inputs)
-  const collected = await collectAccounts(expanded.files, keyProvider)
+  const collected = await collectAccounts(expanded.files, keyProvider, variant)
+  // A credential for the other product is refused, never stored: the pool is
+  // keyed by variant, and one product's token must not be sent to the other's
+  // endpoint. Reported rather than dropped silently, so a mixed directory is
+  // visibly a mixed directory.
+  const { accepted, rejected } = partitionByRegion(collected.accounts, variant)
   const errors = [...expanded.errors, ...collected.errors]
-  if (collected.accounts.length === 0) {
+  const regionNotes = rejected.length === 0 ? [] : [
+    `skipped ${rejected.length} account(s) belonging to ${variant.region === 'cn' ? 'WorkBuddy AI' : 'WorkBuddy (CN)'} (this pool serves ${variant.displayName}): ${rejected.map(account => account.uid === '' ? '(no uid)' : account.uid).join(', ')}`,
+  ]
+  if (accepted.length === 0) {
     const report = {
       action: 'import',
       pool: pool.filePath(),
       files: collected.perFile,
       errors,
+      ...regionNotes.length === 0 ? {} : { regionSkipped: rejected.length },
       imported: 0,
       added: 0,
       updated: 0,
@@ -284,6 +354,7 @@ export async function commandImport(
     emit(report, options.json, () => [
       `Pool: ${pool.filePath()}`,
       ...errors.map(error => `ERROR ${error.path}: ${error.reason}`),
+      ...regionNotes,
       'No accounts imported.',
     ])
     return 1
@@ -294,7 +365,7 @@ export async function commandImport(
   // directory cannot override a current one; on a tie the first file listed wins,
   // which keeps a directory import deterministic.
   const deduped = new Map<string, WorkBuddyPoolCredential>()
-  for (const account of collected.accounts) {
+  for (const account of accepted) {
     const key = poolKeyOf(account, tokenHash)
     const previous = deduped.get(key)
     if (previous === undefined || account.expiresAtMs > previous.expiresAtMs) deduped.set(key, account)
@@ -307,6 +378,7 @@ export async function commandImport(
     pool: pool.filePath(),
     files: collected.perFile,
     errors,
+    ...regionNotes.length === 0 ? {} : { regionSkipped: rejected.length },
     imported: deduped.size,
     added: merged.added,
     updated: merged.updated,
@@ -320,6 +392,7 @@ export async function commandImport(
     ...collected.perFile.map(file =>
       `Read ${file.accounts} account(s) from ${file.path}${file.encrypted === true ? ' (decrypted)' : ''}${file.skippedLines === undefined ? '' : ` (${file.skippedLines} line(s) without an account)`}`),
     ...errors.map(error => `ERROR ${error.path}: ${error.reason}`),
+    ...regionNotes,
     ...merged.entries.map(entry => `  ${entry.action.padEnd(8)} ${entry.key}${entry.nickname === undefined ? '' : ` (${entry.nickname})`}`),
     '',
     `Imported ${deduped.size} account(s): added=${merged.added} updated=${merged.updated} unchanged=${merged.skipped}`,
@@ -588,7 +661,7 @@ export async function runPoolCommand(argv: readonly string[]): Promise<number> {
         // uses, so `import` unlocks a desktop credential exactly the way the
         // live store does — and a failure to locate the helper is reported as
         // the same diagnosis `doctor` gives.
-        return await commandImport(pool, positional, options, atRestKeyProviderFor(variant))
+        return await commandImport(pool, positional, options, variant, atRestKeyProviderFor(variant))
       case 'accounts':
         return commandAccounts(pool, options)
       case 'checkin':

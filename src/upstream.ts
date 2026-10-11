@@ -1197,6 +1197,13 @@ export class WorkBuddyUpstreamClient {
         if (classifyUpstreamError(response.status, envelope.msg) === 'session_dead') {
           return { status: 'auth', detail }
         }
+        // An idempotent answer can arrive as a 4xx: the international product has
+        // no check-in at all and reports `签到活动未开启或已过期` with HTTP 400
+        // (measured 2026-10-11). Reading that as a failure would mark every
+        // international account broken on every run, when the truth is that there
+        // is nothing to claim. The same idempotent vocabulary therefore applies
+        // here, over the upstream's own message.
+        if (classifyCheckinOutcome(envelope.msg, undefined) === 'already') return { status: 'already', detail }
         return { status: 'failed', detail }
       }
       if (envelope.code !== 0) {

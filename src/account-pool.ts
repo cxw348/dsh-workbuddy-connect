@@ -530,7 +530,15 @@ export function parseImportText(text: string): { accounts: WorkBuddyPoolCredenti
  */
 export const IDEMPOTENT_CODES: readonly string[] = ['10001', '14001']
 
-/** Business-message markers with the same meaning as {@link IDEMPOTENT_CODES}. */
+/**
+ * Business-message markers with the same meaning as {@link IDEMPOTENT_CODES}.
+ *
+ * The "not applicable" half matters as much as the "already claimed" half: the
+ * international product has no daily check-in at all and answers a claim with
+ * `签到活动未开启或已过期` (HTTP 400), measured on 2026-10-11. Counting that as a
+ * failure would mark every international account broken on every run — the
+ * opposite of the truth, since there is simply nothing to claim there.
+ */
 export const IDEMPOTENT_MARKERS: readonly string[] = [
   '今天已签到',
   '今日已签到',
@@ -539,6 +547,7 @@ export const IDEMPOTENT_MARKERS: readonly string[] = [
   '未开启',
   '未开放',
   '已过期',
+  '活动未开启',
   'inactive',
 ]
 
