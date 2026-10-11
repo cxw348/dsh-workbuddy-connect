@@ -449,17 +449,30 @@ export class WorkBuddyAccountPool {
  * - `{accounts: [...]}` / `{auths: [...]}` / `{entries: [...]}` wrappers,
  * - a map keyed by uid whose values are account documents,
  * - a single account document.
+ *
+ * **The document is tried before its array fields**, and that order is
+ * load-bearing rather than cosmetic. The real desktop credential carries
+ * `accounts` and `allAccounts` arrays that hold *account metadata* — uid, type,
+ * lastLogin — while the tokens live in the top-level `auth`. Reading those
+ * arrays first finds no access token in them and reports zero accounts for a
+ * file that plainly has one, which is exactly how "I imported my own account and
+ * it still says one account" happens. Trying the document itself first means a
+ * file that *is* a credential is always read as one, and the array wrappers
+ * still work for files that genuinely are batches.
  */
 export function accountsFromPayload(value: unknown): WorkBuddyPoolCredential[] {
   if (Array.isArray(value)) return value.flatMap(item => accountsFromPayload(item))
   if (typeof value !== 'object' || value === null) return []
   const document = value as Record<string, unknown>
-  for (const field of ['accounts', 'auths', 'entries', 'data', 'list']) {
-    const nested = document[field]
-    if (Array.isArray(nested)) return nested.flatMap(item => accountsFromPayload(item))
-  }
   const direct = parseAccountDocument(document)
   if (direct !== undefined) return [direct]
+  for (const field of ['accounts', 'auths', 'entries', 'data', 'list']) {
+    const nested = document[field]
+    if (Array.isArray(nested)) {
+      const found = nested.flatMap(item => accountsFromPayload(item))
+      if (found.length > 0) return found
+    }
+  }
   // A map keyed by uid (or by filename stem): every value that parses wins.
   const collected: WorkBuddyPoolCredential[] = []
   for (const nested of Object.values(document)) {

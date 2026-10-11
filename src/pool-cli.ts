@@ -25,6 +25,14 @@ import {
   type WorkBuddyPoolCredential,
   type WorkBuddyPoolEntry,
 } from './account-pool.ts'
+import {
+  atRestKeyProviderFor,
+  classifyDesktopAuthDocument,
+  keyIdsOf,
+  openAuthField,
+  unwrapDesktopAuthDocument,
+  type WorkBuddyAtRestKeyProvider,
+} from './desktop-credential-protection.ts'
 import { CN_VARIANT, variantFor, WORKBUDDY_VARIANTS, type WorkBuddyVariant } from './variants.ts'
 import { WorkBuddyUpstreamClient } from './upstream.ts'
 
@@ -115,26 +123,69 @@ export function expandImportPaths(inputs: readonly string[]): {
 }
 
 /**
+ * Read one import file, decrypting it when it is a WorkBuddy 5.6+ envelope.
+ *
+ * This is the path a real user takes: the desktop app seals its token fields
+ * since 5.6, so the *only* account a fresh install has is an encrypted document.
+ * An importer that understood plaintext alone would report "no account document
+ * found" for the user's own sign-in — which is exactly the shape of "I imported
+ * my account and it still says one account".
+ *
+ * The decryption reuses the plugin's existing classification and field-opening
+ * helpers rather than reimplementing the envelope, so the pool and the live
+ * credential store can never disagree about how a document reads. A document
+ * that is neither plaintext nor a decodable envelope is reported as such, and a
+ * failed unlock names the field and key id — never token content.
+ */
+async function readImportFile(
+  file: string,
+  keyProvider: WorkBuddyAtRestKeyProvider | undefined,
+): Promise<{ text: string, encrypted: boolean }> {
+  const text = readFileSync(file, 'utf8')
+  const classification = classifyDesktopAuthDocument(text)
+  if (classification.format === 'plaintext') return { text, encrypted: false }
+  if (classification.format !== 'encrypted') return { text, encrypted: false }
+  if (keyProvider === undefined) {
+    throw new Error('the file is an encrypted WorkBuddy credential and no key provider is available for this provider id')
+  }
+  const key = await keyProvider.protectorKeyFor(keyIdsOf(classification.wrapped.fields))
+  const plaintext = unwrapDesktopAuthDocument(classification, (field) => {
+    const opened = openAuthField(key, field.envelope)
+    if (opened === undefined) {
+      throw new Error(`the encrypted credential's ${field.field} could not be decrypted (envelope key id ${field.envelope.keyId})`)
+    }
+    return opened
+  })
+  return { text: plaintext, encrypted: true }
+}
+
+/**
  * Read and parse every import file, returning the accounts found.
  *
  * A file that yields zero accounts is an error rather than a silent no-op: the
  * most likely cause is pointing at the wrong file, and "imported 0 accounts" with
  * exit 0 would let that mistake stand.
  */
-export function collectAccounts(files: readonly string[]): {
+export async function collectAccounts(
+  files: readonly string[],
+  keyProvider?: WorkBuddyAtRestKeyProvider,
+): Promise<{
   accounts: WorkBuddyPoolCredential[]
   errors: { path: string; reason: string }[]
-  perFile: { path: string; accounts: number; skippedLines?: number }[]
-} {
+  perFile: { path: string; accounts: number; skippedLines?: number; encrypted?: boolean }[]
+}> {
   const accounts: WorkBuddyPoolCredential[] = []
   const errors: { path: string; reason: string }[] = []
-  const perFile: { path: string; accounts: number; skippedLines?: number }[] = []
+  const perFile: { path: string; accounts: number; skippedLines?: number; encrypted?: boolean }[] = []
   for (const file of files) {
     let text: string
+    let encrypted = false
     try {
-      text = readFileSync(file, 'utf8')
+      const read = await readImportFile(file, keyProvider)
+      text = read.text
+      encrypted = read.encrypted
     } catch (error: unknown) {
-      errors.push({ path: file, reason: `cannot read: ${error instanceof Error ? error.message : String(error)}` })
+      errors.push({ path: file, reason: error instanceof Error ? error.message : String(error) })
       continue
     }
     try {
@@ -148,6 +199,7 @@ export function collectAccounts(files: readonly string[]): {
         path: file,
         accounts: parsed.accounts.length,
         ...parsed.skippedLines === 0 ? {} : { skippedLines: parsed.skippedLines },
+        ...encrypted ? { encrypted: true } : {},
       })
     } catch (error: unknown) {
       errors.push({ path: file, reason: error instanceof Error ? error.message : String(error) })
@@ -204,13 +256,18 @@ function emit(report: unknown, jsonOutput: boolean, lines: () => string[]): void
  * deliberately refuses to roll a fresher stored token back. The flag is explicit
  * so the rollback is always a decision, never a side effect.
  */
-export function commandImport(pool: WorkBuddyAccountPool, inputs: readonly string[], options: PoolOptions): number {
+export async function commandImport(
+  pool: WorkBuddyAccountPool,
+  inputs: readonly string[],
+  options: PoolOptions,
+  keyProvider?: WorkBuddyAtRestKeyProvider,
+): Promise<number> {
   if (inputs.length === 0) {
     process.stderr.write('workbuddy pool import: at least one file or directory is required\n')
     return 1
   }
   const expanded = expandImportPaths(inputs)
-  const collected = collectAccounts(expanded.files)
+  const collected = await collectAccounts(expanded.files, keyProvider)
   const errors = [...expanded.errors, ...collected.errors]
   if (collected.accounts.length === 0) {
     const report = {
@@ -261,7 +318,7 @@ export function commandImport(pool: WorkBuddyAccountPool, inputs: readonly strin
   emit(report, options.json, () => [
     `Pool: ${pool.filePath()}`,
     ...collected.perFile.map(file =>
-      `Read ${file.accounts} account(s) from ${file.path}${file.skippedLines === undefined ? '' : ` (${file.skippedLines} line(s) without an account)`}`),
+      `Read ${file.accounts} account(s) from ${file.path}${file.encrypted === true ? ' (decrypted)' : ''}${file.skippedLines === undefined ? '' : ` (${file.skippedLines} line(s) without an account)`}`),
     ...errors.map(error => `ERROR ${error.path}: ${error.reason}`),
     ...merged.entries.map(entry => `  ${entry.action.padEnd(8)} ${entry.key}${entry.nickname === undefined ? '' : ` (${entry.nickname})`}`),
     '',
@@ -527,7 +584,11 @@ export async function runPoolCommand(argv: readonly string[]): Promise<number> {
   try {
     switch (action) {
       case 'import':
-        return commandImport(pool, positional, options)
+        // The key provider is built from the same shared helper the plugin host
+        // uses, so `import` unlocks a desktop credential exactly the way the
+        // live store does — and a failure to locate the helper is reported as
+        // the same diagnosis `doctor` gives.
+        return await commandImport(pool, positional, options, atRestKeyProviderFor(variant))
       case 'accounts':
         return commandAccounts(pool, options)
       case 'checkin':

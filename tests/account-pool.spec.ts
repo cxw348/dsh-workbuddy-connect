@@ -34,6 +34,7 @@ import {
   type WorkBuddyPoolCredential,
 } from '../src/account-pool.ts'
 import { WorkBuddyPoolCredentialResolver, type WorkBuddyCredentialSource } from '../src/pool-store.ts'
+import { collectAccounts } from '../src/pool-cli.ts'
 import { WorkBuddyUpstreamClient } from '../src/upstream.ts'
 import { WorkBuddyCredentialStore } from '../src/auth.ts'
 import { WorkBuddyCatalog } from '../src/catalog.ts'
@@ -160,6 +161,50 @@ describe('parseImportText', () => {
   it('rejects a document with no access token', () => {
     // Accepting it would only produce a pool that fails later with a worse message.
     expect(parseImportText(JSON.stringify({ uid: 'u-x', nickname: 'no token' })).accounts).toHaveLength(0)
+  })
+
+  it('reads the real desktop credential shape, whose metadata arrays carry no tokens', () => {
+    // The actual desktop file carries `accounts` / `allAccounts` arrays holding
+    // account *metadata* (uid, type, lastLogin) while the tokens live in the
+    // top-level `auth`. A reader that consumed those arrays first found no access
+    // token in them and reported zero accounts for a file that plainly has one —
+    // the exact shape of "I imported my own account and it still says one
+    // account". The document itself must be tried before its array fields.
+    const parsed = parseImportText(JSON.stringify({
+      account: { uid: 'uid-real', nickname: 'nick', type: 'personal', lastLogin: true },
+      auth: {
+        accessToken: 'AT-REAL',
+        refreshToken: 'RT-REAL',
+        expiresAt: 1_893_456_000_000,
+        domain: 'www.workbuddy.ai',
+      },
+      accounts: [{ uid: 'uid-real', type: 'personal', lastLogin: true }],
+      allAccounts: [{ uid: 'uid-real', type: 'personal', lastLogin: true }],
+    }))
+    expect(parsed.accounts).toHaveLength(1)
+    expect(parsed.accounts[0]).toMatchObject({ uid: 'uid-real', accessToken: 'AT-REAL', refreshToken: 'RT-REAL' })
+  })
+
+  it('still reads a genuine batch wrapper when the document is not itself a credential', () => {
+    const parsed = parseImportText(JSON.stringify({
+      accounts: [
+        { accessToken: 'AT-B1', uid: 'b-1' },
+        { accessToken: 'AT-B2', uid: 'b-2' },
+      ],
+    }))
+    expect(parsed.accounts.map(a => a.uid)).toEqual(['b-1', 'b-2'])
+  })
+
+  it('tolerates a non-string nickname, as the real encrypted document carries', () => {
+    // The desktop app seals `nickname` into an envelope object; it is display
+    // metadata, so an unreadable one must not sink an otherwise usable account.
+    const parsed = parseImportText(JSON.stringify({
+      account: { uid: 'uid-nick', nickname: { $wbEncrypted: 1, envelope: 'xxx' } },
+      auth: { accessToken: 'AT-NICK', refreshToken: 'RT-NICK', domain: 'www.workbuddy.ai' },
+    }))
+    expect(parsed.accounts).toHaveLength(1)
+    expect(parsed.accounts[0]!.uid).toBe('uid-nick')
+    expect(parsed.accounts[0]!.nickname).toBeUndefined()
   })
 
   it('reports a file that is neither JSON nor JSON Lines', () => {
@@ -584,6 +629,95 @@ describe('shim integration: a dead session rotates the pool', () => {
         expect((await store.current())!.accessToken).toBe('AT-S1')
       },
     )
+  })
+})
+
+describe('importing an encrypted desktop credential', () => {
+  /**
+   * The path a real user takes.
+   *
+   * Since WorkBuddy 5.6 the desktop app seals its token fields, so the *only*
+   * account a fresh install has is an encrypted document. An importer that
+   * understood plaintext alone reported "no account document found" for the
+   * user's own sign-in — which is the exact shape of "I imported my account and
+   * it still says one account".
+   *
+   * These tests seal a document with the same helper the plugin's own test suite
+   * uses, so the fixture is the real envelope format rather than a lookalike.
+   */
+  async function sealDocument(key: Buffer, document: Record<string, unknown>): Promise<string> {
+    const { sealAuthFieldForTest } = await import('../src/desktop-credential-protection.ts')
+    const sealed = structuredClone(document)
+    const auth = sealed['auth'] as Record<string, unknown>
+    for (const field of ['accessToken', 'refreshToken']) {
+      if (typeof auth[field] === 'string') auth[field] = sealAuthFieldForTest(key, auth[field] as string)
+    }
+    return JSON.stringify(sealed)
+  }
+
+  /** A key provider standing in for the Electron helper. */
+  function stubKeyProvider(key: Buffer): { protectorKeyFor: () => Promise<Buffer>, helperPath: () => string } {
+    return { protectorKeyFor: async () => key, helperPath: () => '/stub' }
+  }
+
+  it('decrypts and imports a sealed desktop credential', async () => {
+    const { deriveProtectorKey } = await import('../src/desktop-credential-protection.ts')
+    const key = deriveProtectorKey('test-protector-secret')
+    const text = await sealDocument(key, {
+      account: { uid: 'uid-sealed', nickname: 'nick', type: 'personal', lastLogin: true },
+      auth: {
+        accessToken: 'AT-SEALED',
+        refreshToken: 'RT-SEALED',
+        expiresAt: 1_893_456_000_000,
+        domain: 'www.workbuddy.ai',
+      },
+      accounts: [{ uid: 'uid-sealed', type: 'personal' }],
+      allAccounts: [{ uid: 'uid-sealed', type: 'personal' }],
+    })
+    const dir = tempDir()
+    const file = join(dir, 'workbuddy-desktop-ai.info')
+    writeFileSync(file, text)
+
+    const collected = await collectAccounts([file], stubKeyProvider(key) as never)
+    expect(collected.errors).toEqual([])
+    expect(collected.perFile[0]).toMatchObject({ accounts: 1, encrypted: true })
+    expect(collected.accounts[0]).toMatchObject({ uid: 'uid-sealed', accessToken: 'AT-SEALED', refreshToken: 'RT-SEALED' })
+  })
+
+  it('reports a failed unlock instead of silently importing nothing', async () => {
+    const { deriveProtectorKey } = await import('../src/desktop-credential-protection.ts')
+    const sealedWith = deriveProtectorKey('the-real-secret')
+    const wrongKey = deriveProtectorKey('a-different-secret')
+    const text = await sealDocument(sealedWith, {
+      account: { uid: 'uid-sealed' },
+      auth: { accessToken: 'AT-SEALED', refreshToken: 'RT-SEALED', domain: 'www.workbuddy.ai' },
+    })
+    const dir = tempDir()
+    const file = join(dir, 'workbuddy-desktop-ai.info')
+    writeFileSync(file, text)
+
+    const collected = await collectAccounts([file], stubKeyProvider(wrongKey) as never)
+    expect(collected.accounts).toEqual([])
+    // The diagnosis must name the field, and must not be a generic "no account".
+    expect(collected.errors[0]!.reason).toMatch(/could not be decrypted/u)
+    expect(collected.errors[0]!.reason).toMatch(/accessToken/u)
+  })
+
+  it('reads a plaintext file without touching the key provider', async () => {
+    const dir = tempDir()
+    const file = join(dir, 'plain.json')
+    writeFileSync(file, JSON.stringify({ accessToken: 'AT-PLAIN', uid: 'u-plain', domain: 'www.workbuddy.ai' }))
+    let asked = false
+    const collected = await collectAccounts([file], {
+      protectorKeyFor: async () => {
+        asked = true
+        throw new Error('must not be called for a plaintext file')
+      },
+      helperPath: () => '/stub',
+    } as never)
+    expect(collected.accounts).toHaveLength(1)
+    expect(asked).toBe(false)
+    expect(collected.perFile[0]!.encrypted).toBeUndefined()
   })
 })
 
