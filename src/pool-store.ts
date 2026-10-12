@@ -68,6 +68,16 @@ export interface WorkBuddyCredentialSource {
    */
   reportDead?(credential: WorkBuddyCredential, reason?: string): boolean
   /**
+   * Optional: point the resolver at one account, so the user chooses the
+   * credential from the card instead of trusting rotation order.
+   *
+   * Optional because the single-account store has nothing to switch between — it
+   * has no opinion, and a caller must not have to care which implementation it
+   * holds. Returns whether the switch happened, so an unknown or disabled key is
+   * reported as a refusal rather than as a silent success.
+   */
+  preferAccount?(account: string): boolean
+  /**
    * Optional: the pool's accounts, for the settings card.
    *
    * Optional for the same reason as {@link reportDead}: a single-account store
@@ -279,6 +289,29 @@ export class WorkBuddyPoolCredentialResolver implements WorkBuddyCredentialSourc
     const entries = this.pool.usable()
     const index = entries.findIndex(entry => entry.key === key)
     if (index >= 0) this.cursor = (index + 1) % Math.max(entries.length, 1)
+  }
+
+  /**
+   * Point the resolver at one account, so the user chooses the credential
+   * instead of trusting rotation order.
+   *
+   * The key must already be in the pool: this only ever moves the cursor, it
+   * does not accept an account from the caller, because "switch to an account
+   * that does not exist" is not a state a request can be in.
+   *
+   * Returns whether the switch happened, so the caller can report a refusal
+   * (unknown key, disabled account) instead of reporting success for a no-op.
+   */
+  prefer(key: string): boolean {
+    const entry = this.pool.get(key)
+    if (entry === undefined || entry.disabled === true) return false
+    const index = this.pool.usable().findIndex(candidate => candidate.key === key)
+    if (index < 0) return false
+    this.cursor = index
+    // A previously retired account that the user explicitly picks comes back:
+    // they are overriding the rotation, which is the whole point.
+    this.retired.delete(key)
+    return true
   }
 
   /** Keys retired in this process, for diagnostics. */

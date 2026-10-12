@@ -531,6 +531,42 @@ export function moveToFront(pool: WorkBuddyAccountPool, key: string): boolean {
   return true
 }
 
+/**
+ * Make one pooled account the active credential.
+ *
+ * "Active" is positional rather than a stored flag: the resolver walks the pool
+ * from a cursor, so the account the user picks is moved to the front and the
+ * cursor is reset to it. A stored `active` field would have to be reconciled
+ * against the cursor on every read and would go stale the moment another
+ * account was retired.
+ *
+ * `disabled` is honoured rather than bypassed: an account the user excluded stays
+ * excluded, because a picker entry that resurrects it would make "disable"
+ * meaningless.
+ *
+ * Refusals come back as a `state`, matching how the other control actions
+ * report, so the card can show the reason instead of failing.
+ */
+export function useAccount(
+  pool: WorkBuddyAccountPool,
+  account: string,
+): { state: 'ok' | 'refused'; reason?: string } {
+  const entry = pool.get(account)
+  if (entry === undefined) {
+    return { state: 'refused', reason: `no account with key ${account} in the pool` }
+  }
+  if (entry.disabled === true) {
+    return { state: 'refused', reason: `account ${account} is disabled; enable it first` }
+  }
+  const moved = moveToFront(pool, account)
+  if (!moved) {
+    // Already at the front: still a success, because the user asked for that
+    // account and that is what is active.
+    return { state: 'ok', reason: `account ${account} is already active` }
+  }
+  return { state: 'ok', reason: `account ${account} is now active` }
+}
+
 /** `use` / `disable` / `enable` / `remove` — mutate one entry by key. */
 export function commandEntry(pool: WorkBuddyAccountPool, action: string, key: string, options: PoolOptions): number {
   const entry = pool.get(key)

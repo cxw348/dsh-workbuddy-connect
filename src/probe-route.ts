@@ -62,6 +62,15 @@ export interface WorkBuddyProbeRouteOptions {
    */
   setModelVisibility?: (modelId: string, visible: boolean, expectedAccount: string) => Promise<{ state: string; reason?: string }>
   /**
+   * Make one pooled account the active credential, so the user chooses the
+   * account from the card rather than trusting rotation order.
+   *
+   * The handler reports a refused switch as a state, never as an exception: an
+   * unknown key, a disabled account, or an install with no pool are all user
+   * situations, and the card needs to say which happened rather than fail.
+   */
+  useAccount?: (account: string) => Promise<{ state: string; reason?: string }>
+  /**
    * Route path to mount. Defaults to the CN variant's path so existing callers
    * and tests keep their behaviour; the international variant passes its own.
    */
@@ -132,6 +141,13 @@ function parseAction(text: string): WorkBuddyProbeAction | undefined {
     if (typeof wrapped['visible'] !== 'boolean') return undefined
     if (typeof account !== 'string' || account === '') return undefined
     return { action: 'set-model-visibility', model: model.trim(), visible: wrapped['visible'], account }
+  }
+  if (action === 'use-account') {
+    const account = wrapped['account']
+    // Same rule as `set-model-visibility`: the key must be a string, and the
+    // host — not the browser — decides whether it names a real account.
+    if (typeof account !== 'string' || account.trim() === '') return undefined
+    return { action: 'use-account', account: account.trim() }
   }
   if (action === 'probe') {
     const model = wrapped['model']
@@ -204,6 +220,14 @@ export function workBuddyProbeHandler(
           action.visible === true,
           action.account as string,
         ))
+        return
+      }
+      if (action.action === 'use-account') {
+        if (deps.useAccount === undefined) {
+          json(res, 404, { error: 'account-switching-not-supported' })
+          return
+        }
+        json(res, 200, await deps.useAccount(action.account as string))
         return
       }
       json(res, 200, await deps.probe(action.model as string))

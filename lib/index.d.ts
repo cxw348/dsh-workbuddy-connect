@@ -1201,6 +1201,16 @@ interface WorkBuddyCredentialSource {
    */
   reportDead?(credential: WorkBuddyCredential, reason?: string): boolean;
   /**
+   * Optional: point the resolver at one account, so the user chooses the
+   * credential from the card instead of trusting rotation order.
+   *
+   * Optional because the single-account store has nothing to switch between — it
+   * has no opinion, and a caller must not have to care which implementation it
+   * holds. Returns whether the switch happened, so an unknown or disabled key is
+   * reported as a refusal rather than as a silent success.
+   */
+  preferAccount?(account: string): boolean;
+  /**
    * Optional: the pool's accounts, for the settings card.
    *
    * Optional for the same reason as {@link reportDead}: a single-account store

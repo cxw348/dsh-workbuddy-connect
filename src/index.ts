@@ -855,6 +855,35 @@ export function apply(ctx: Context, config: Config): void {
             ? { state: 'refreshed', reason: `${runtime.catalog.current().length} models` }
             : { state: 'failed', reason: runtime.catalogError }
         },
+        // The user picks an account from the card rather than trusting
+        // rotation order. The switch itself is positional in the pool; the
+        // catalog is then re-read for that account, because a different account
+        // sees a different roster and a different hidden-model list — reusing
+        // the old one would show the previous account's models.
+        useAccount: async account => {
+          if (stopped) return { state: 'failed', reason: 'plugin is stopping' }
+          // Optional member: the single-account store has nothing to switch
+          // between, and that absence is a normal configuration, not an error.
+          if (runtime.store.preferAccount?.(account) !== true) {
+            return { state: 'refused', reason: `account ${account} is not usable in this pool` }
+          }
+          let credential
+          try {
+            credential = await runtime.store.current()
+          } catch (error: unknown) {
+            return {
+              state: 'failed',
+              reason: error instanceof Error ? error.message.slice(0, 300) : String(error),
+            }
+          }
+          if (credential === undefined) return { state: 'signed-out' }
+          const identity = credentialIdentity(credential)
+          // The same transition the sweep performs, so switching accounts here
+          // and letting the sweep notice are indistinguishable downstream.
+          adoptIdentity(runtime, identity, visibilityAccountOf(credential))
+          await fetchCatalog(runtime, identity)
+          return { state: 'ok', reason: `now using ${identity}` }
+        },
         ...runtime.variant.id === CN_VARIANT.id ? {} : {
           setMaximumContextWindow: async enabled => {
             if (setMaximumContextWindow === undefined) return { state: 'failed', reason: 'settings are unavailable' }

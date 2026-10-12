@@ -310,9 +310,11 @@ const poolListStyle: CSSProperties = { display: 'flex', flexDirection: 'column',
  * and which the upstream has retired — facts that were previously only visible by
  * running the CLI.
  */
-function PoolSection({ pool, t }: {
+function PoolSection({ pool, t, busy, onUse }: {
   pool: WorkBuddyWebPoolSection
   t: WorkBuddyPluginCardInjected['t']
+  busy: boolean
+  onUse: (account: string) => void
 }) {
   return (
     <div style={quotaListStyle}>
@@ -330,7 +332,7 @@ function PoolSection({ pool, t }: {
             <span style={poolKeyStyle} title={account.key}>
               {account.nickname === undefined ? account.key : `${account.nickname} · ${account.key}`}
             </span>
-            <span style={{ display: 'inline-flex', gap: 6, flex: '0 0 auto' }}>
+            <span style={{ display: 'inline-flex', gap: 6, flex: '0 0 auto', alignItems: 'center' }}>
               {account.active ? <span style={poolActiveBadgeStyle}>{t('poolActive')}</span> : null}
               {account.disabled === true ? <span style={poolDisabledBadgeStyle}>{t('poolDisabled')}</span> : null}
               {account.lastCheckinStatus === undefined ? null : (
@@ -347,6 +349,22 @@ function PoolSection({ pool, t }: {
                     ? t('poolAccountExpired')
                     : t('poolAccountExpires', { time: formatTime(account.expiresAt) })}
                 </span>
+              )}
+              {/*
+                The switch control, per account. Only a non-active, enabled
+                account gets one: the active row already says so, and offering
+                "use" on a disabled account would imply it can be selected, which
+                the host refuses.
+              */}
+              {account.active || account.disabled === true ? null : (
+                <button
+                  type="button"
+                  style={{ ...buttonStyle, fontSize: 12, padding: '2px 10px' }}
+                  disabled={busy}
+                  onClick={() => { onUse(account.key) }}
+                >
+                  {t('poolUseAccount')}
+                </button>
               )}
             </span>
           </li>
@@ -1136,7 +1154,7 @@ export function WorkBuddyPluginCard({ t, variant = CN_CARD_VARIANT }: WorkBuddyP
    * the host never accepts a prompt, a sentinel, or a model outside its own
    * catalog from here.
    */
-  const control = useCallback(async (action: { action: 'probe'; model: string } | { action: 'clear' } | { action: 'set-maximum-context-window'; enabled: boolean } | { action: 'set-model-visibility'; model: string; visible: boolean; account: string }): Promise<void> => {
+  const control = useCallback(async (action: { action: 'probe'; model: string } | { action: 'clear' } | { action: 'set-maximum-context-window'; enabled: boolean } | { action: 'set-model-visibility'; model: string; visible: boolean; account: string } | { action: 'use-account'; account: string }): Promise<void> => {
     const key = status?.status === 'signed-in' ? status.probeKey : undefined
     if (key === undefined) return
     // A visibility toggle runs on its own per-row in-flight set so the
@@ -1372,7 +1390,14 @@ export function WorkBuddyPluginCard({ t, variant = CN_CARD_VARIANT }: WorkBuddyP
                       )}
                       {status.creditsError === undefined ? null
                         : <p style={errorStyle}>{t('creditsError', { message: status.creditsError })}</p>}
-                      {status.pool === undefined ? null : <PoolSection pool={status.pool} t={t} />}
+                      {status.pool === undefined ? null : (
+                        <PoolSection
+                          pool={status.pool}
+                          t={t}
+                          busy={busy}
+                          onUse={account => { void control({ action: 'use-account', account }) }}
+                        />
+                      )}
                       {status.probe === undefined ? null : (
                         <ProbeSection
                           probe={status.probe}

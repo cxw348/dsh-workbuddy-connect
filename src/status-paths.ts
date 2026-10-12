@@ -63,12 +63,13 @@ export interface WorkBuddyProbeAction {
    * `refresh` re-reads the credential and re-fetches the model catalog;
    * `set-maximum-context-window` persists the international card preference;
    * `set-model-visibility` hides or shows one model for the signed-in
-   * account's picker.
+   * account's picker; `use-account` swaps the pool's active account, so the
+   * user picks one from the card instead of trusting rotation order.
    *
-   * All five are writes, which is why they share this route's in-process key
+   * All six are writes, which is why they share this route's in-process key
    * and loopback guards rather than the read-only status GET.
    */
-  action: 'probe' | 'clear' | 'refresh' | 'set-maximum-context-window' | 'set-model-visibility'
+  action: 'probe' | 'clear' | 'refresh' | 'set-maximum-context-window' | 'set-model-visibility' | 'use-account'
   /** Target model id; required for `probe` and `set-model-visibility`. */
   model?: string
   /** Requested value for `set-maximum-context-window` and `set-model-visibility`. */
@@ -76,10 +77,17 @@ export interface WorkBuddyProbeAction {
   /** Requested picker visibility for `set-model-visibility`. */
   visible?: boolean
   /**
-   * Expected account key for `set-model-visibility`: the `visibility.account`
-   * the card rendered its checkboxes from. The host refuses the write when the
-   * signed-in account has moved on, so a stale card can never land one
-   * account's toggle in another account's bucket.
+   * Which account the write concerns, for `set-model-visibility` and
+   * `use-account`.
+
+   * `set-model-visibility` names the account it *expects* — the
+   * `visibility.account` the card rendered its checkboxes from. The host refuses
+   * the write when the signed-in account has moved on, so a stale card can never
+   * land one account's toggle in another account's bucket.
+
+   * `use-account` names the account it *wants*: the pool key shown in the
+   * pool section. Both are taken from what the host already sent the card, so
+   * the browser never invents an account.
    */
   account?: string
 }
