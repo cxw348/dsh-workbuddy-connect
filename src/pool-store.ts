@@ -26,6 +26,7 @@
 import { poolKeyOf, type WorkBuddyAccountPool, type WorkBuddyPoolCredential } from './account-pool.ts'
 import type { WorkBuddyAuthStatus, WorkBuddyCredential } from './auth.ts'
 import type { DesktopAuthFormat } from './desktop-credential-protection.ts'
+import type { WorkBuddyWebPoolSection } from './status-paths.ts'
 import type { WorkBuddyRefreshOutcome } from './upstream.ts'
 
 /**
@@ -66,6 +67,15 @@ export interface WorkBuddyCredentialSource {
    * "this credential will keep failing until a human acts".
    */
   reportDead?(credential: WorkBuddyCredential, reason?: string): boolean
+  /**
+   * Optional: the pool's accounts, for the settings card.
+   *
+   * Optional for the same reason as {@link reportDead}: a single-account store
+   * has no pool to describe, and the card treats "no section" as "this install
+   * has no pool" rather than as an error. Returns `undefined` for an empty pool,
+   * which is what keeps a never-imported install's card byte-identical to before.
+   */
+  poolSection?(): WorkBuddyWebPoolSection | undefined
 }
 
 /** Constructor options for {@link WorkBuddyPoolCredentialResolver}. */
@@ -274,6 +284,34 @@ export class WorkBuddyPoolCredentialResolver implements WorkBuddyCredentialSourc
   /** Keys retired in this process, for diagnostics. */
   retiredKeys(): { key: string; reason: string }[] {
     return [...this.retired.entries()].map(([key, reason]) => ({ key, reason }))
+  }
+
+  /**
+   * The pool as the settings card renders it, or `undefined` for an empty pool.
+   *
+   * `undefined` rather than an empty section, deliberately: the card keys the
+   * whole pool block on this field's presence, so a never-imported install keeps
+   * the card it has always had. No token material crosses this boundary — the
+   * key is the same identity string the rest of the plugin uses.
+   */
+  poolSection(): WorkBuddyWebPoolSection | undefined {
+    const entries = this.pool.all()
+    if (entries.length === 0) return undefined
+    const counts = this.pool.counts()
+    const activeKey = this.nextEntry()?.key
+    return {
+      total: counts.total,
+      usable: counts.usable,
+      retired: this.retired.size,
+      accounts: entries.map(entry => ({
+        key: entry.key,
+        ...entry.credential.nickname === undefined ? {} : { nickname: entry.credential.nickname },
+        ...entry.disabled === true ? { disabled: true } : {},
+        active: entry.key === activeKey,
+        ...entry.credential.expiresAtMs <= 0 ? {} : { expiresAt: entry.credential.expiresAtMs },
+        ...entry.lastCheckinStatus === undefined ? {} : { lastCheckinStatus: entry.lastCheckinStatus },
+      })),
+    }
   }
 
   /** Clear the in-process retirement list, so retired accounts are retried. */

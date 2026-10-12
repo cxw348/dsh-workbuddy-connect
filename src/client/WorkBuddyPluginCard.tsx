@@ -10,7 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { WORKBUDDY_AI_PROBE_PATH, WORKBUDDY_AI_STATUS_PATH, WORKBUDDY_PROBE_PATH, WORKBUDDY_STATUS_PATH, isWorkBuddySignedOutReasonCode } from '../status-paths.ts'
 import type { WorkBuddyWebCreditExpiry } from '../status-paths.ts'
-import type { WorkBuddySignedOutReasonCode, WorkBuddyWebModelBadge, WorkBuddyWebProbeSection, WorkBuddyWebStatus, WorkBuddyWebVisibilitySection } from '../status-paths.ts'
+import type { WorkBuddySignedOutReasonCode, WorkBuddyWebModelBadge, WorkBuddyWebPoolSection, WorkBuddyWebProbeSection, WorkBuddyWebStatus, WorkBuddyWebVisibilitySection } from '../status-paths.ts'
 import { isWorkBuddyWebStatus } from './status-document.ts'
 import type { WorkBuddySettingsKey } from './locales.ts'
 
@@ -266,6 +266,95 @@ const modelBadgeChipStyle: CSSProperties = {
   padding: '1px 8px', borderRadius: 999, fontSize: 11, lineHeight: '18px',
   background: 'var(--dsw-alias-state-success-subtle, rgba(34, 160, 107, 0.12))',
   color: 'var(--dsw-alias-state-success-primary, #22a06b)',
+}
+
+/** One pool account row: identity on the left, state on the right. */
+const poolRowStyle: CSSProperties = { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }
+const poolKeyStyle: CSSProperties = {
+  minWidth: 0,
+  color: 'var(--dsw-alias-label-primary)',
+  fontSize: 13,
+  lineHeight: '20px',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+}
+/** Badges ride the account row, matching how model badges are presented. */
+const poolBadgeStyle: CSSProperties = {
+  flex: '0 0 auto',
+  padding: '1px 8px',
+  borderRadius: 999,
+  fontSize: 11,
+  lineHeight: '18px',
+  background: 'var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.06))',
+  color: 'var(--dsw-alias-label-secondary)',
+}
+const poolActiveBadgeStyle: CSSProperties = {
+  ...poolBadgeStyle,
+  background: 'var(--dsw-alias-state-success-subtle, rgba(34, 160, 107, 0.12))',
+  color: 'var(--dsw-alias-state-success-primary, #22a06b)',
+}
+const poolDisabledBadgeStyle: CSSProperties = {
+  ...poolBadgeStyle,
+  color: 'var(--dsw-alias-label-tertiary)',
+}
+const poolListStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 6, margin: 0, padding: 0, listStyle: 'none' }
+
+/**
+ * The account pool, when one is in use.
+ *
+ * Rendered only when the status document carries a `pool` field, so an install
+ * that never imported anything keeps exactly the card it had before the pool
+ * existed. Every account is listed because the list *is* the feature: a user who
+ * imported a batch needs to see which accounts landed, which one is being served,
+ * and which the upstream has retired — facts that were previously only visible by
+ * running the CLI.
+ */
+function PoolSection({ pool, t }: {
+  pool: WorkBuddyWebPoolSection
+  t: WorkBuddyPluginCardInjected['t']
+}) {
+  return (
+    <div style={quotaListStyle}>
+      <div style={rowStyle}>
+        <h3 style={quotaTitleStyle}>{t('poolHeading')}</h3>
+        <span style={bodyStyle}>
+          {pool.retired > 0
+            ? t('poolSummaryRetired', { total: pool.total, usable: pool.usable, retired: pool.retired })
+            : t('poolSummary', { total: pool.total, usable: pool.usable })}
+        </span>
+      </div>
+      <ul style={poolListStyle}>
+        {pool.accounts.map(account => (
+          <li key={account.key} style={poolRowStyle}>
+            <span style={poolKeyStyle} title={account.key}>
+              {account.nickname === undefined ? account.key : `${account.nickname} · ${account.key}`}
+            </span>
+            <span style={{ display: 'inline-flex', gap: 6, flex: '0 0 auto' }}>
+              {account.active ? <span style={poolActiveBadgeStyle}>{t('poolActive')}</span> : null}
+              {account.disabled === true ? <span style={poolDisabledBadgeStyle}>{t('poolDisabled')}</span> : null}
+              {account.lastCheckinStatus === undefined ? null : (
+                <span style={poolBadgeStyle}>
+                  {account.lastCheckinStatus === 'ok' ? t('poolCheckinOk')
+                    : account.lastCheckinStatus === 'already' ? t('poolCheckinAlready')
+                      : account.lastCheckinStatus === 'auth' ? t('poolCheckinAuth')
+                        : t('poolCheckinFailed')}
+                </span>
+              )}
+              {account.expiresAt === undefined ? null : (
+                <span style={poolBadgeStyle}>
+                  {account.expiresAt <= Date.now()
+                    ? t('poolAccountExpired')
+                    : t('poolAccountExpires', { time: formatTime(account.expiresAt) })}
+                </span>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p style={descriptionStyle}>{t('poolHint')}</p>
+    </div>
+  )
 }
 
 /**
@@ -1283,6 +1372,7 @@ export function WorkBuddyPluginCard({ t, variant = CN_CARD_VARIANT }: WorkBuddyP
                       )}
                       {status.creditsError === undefined ? null
                         : <p style={errorStyle}>{t('creditsError', { message: status.creditsError })}</p>}
+                      {status.pool === undefined ? null : <PoolSection pool={status.pool} t={t} />}
                       {status.probe === undefined ? null : (
                         <ProbeSection
                           probe={status.probe}

@@ -30,6 +30,34 @@ type WorkBuddySignedOutReasonCode =
 'electron-path-invalid' |
 /** Discovery could not finish: tool missing, timeout, output overflow, unreadable plist. */
 'electron-discovery-incomplete';
+/**
+ * The account pool as the card sees it.
+ *
+ * Counts and per-account identity only — the wire document never carries a
+ * token, and an account's key is the same `uid:enterpriseId` identity the rest
+ * of the plugin already uses, not a secret.
+ */
+interface WorkBuddyWebPoolSection {
+  /** Accounts in the pool, including disabled ones. */
+  total: number;
+  /** Accounts eligible for rotation. */
+  usable: number;
+  /** Accounts this process has retired after the upstream rejected them. */
+  retired: number;
+  /** Every account, in rotation order. */
+  accounts: readonly WorkBuddyWebPoolAccount[];
+}
+/** One pool account, described without any token material. */
+interface WorkBuddyWebPoolAccount {
+  key: string;
+  nickname?: string;
+  disabled?: boolean;
+  /** Whether this is the account currently being served. */
+  active: boolean;
+  expiresAt?: number;
+  /** The last check-in verdict, when one has been recorded. */
+  lastCheckinStatus?: string;
+}
 //#endregion
 //#region src/app-version.d.ts
 /** Basename of the saved version under `$DSH_HOME`. */
@@ -1172,6 +1200,15 @@ interface WorkBuddyCredentialSource {
    * "this credential will keep failing until a human acts".
    */
   reportDead?(credential: WorkBuddyCredential, reason?: string): boolean;
+  /**
+   * Optional: the pool's accounts, for the settings card.
+   *
+   * Optional for the same reason as {@link reportDead}: a single-account store
+   * has no pool to describe, and the card treats "no section" as "this install
+   * has no pool" rather than as an error. Returns `undefined` for an empty pool,
+   * which is what keeps a never-imported install's card byte-identical to before.
+   */
+  poolSection?(): WorkBuddyWebPoolSection | undefined;
 }
 //#endregion
 //#region src/catalog.d.ts

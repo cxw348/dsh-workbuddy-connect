@@ -294,6 +294,14 @@ export type WorkBuddyWebStatus =
     /** Per-account hidden-model state for the card's visibility controls. */
     visibility?: WorkBuddyWebVisibilitySection
     /**
+     * The account pool, when one is in use.
+     *
+     * Absent when the pool is empty, and that absence is the compatibility
+     * signal: a single-account install's card renders exactly what it always
+     * has, and only a user who imported accounts sees a pool section at all.
+     */
+    pool?: WorkBuddyWebPoolSection
+    /**
      * In-process key authorizing probe control writes. Handed to the card with
      * the status document (the card is same-origin and already had to pass the
      * loopback guard); it is never persisted and rotates per process.
@@ -301,3 +309,33 @@ export type WorkBuddyWebStatus =
     probeKey?: string
   }
   | { status: 'error'; message: string }
+
+/**
+ * The account pool as the card sees it.
+ *
+ * Counts and per-account identity only — the wire document never carries a
+ * token, and an account's key is the same `uid:enterpriseId` identity the rest
+ * of the plugin already uses, not a secret.
+ */
+export interface WorkBuddyWebPoolSection {
+  /** Accounts in the pool, including disabled ones. */
+  total: number
+  /** Accounts eligible for rotation. */
+  usable: number
+  /** Accounts this process has retired after the upstream rejected them. */
+  retired: number
+  /** Every account, in rotation order. */
+  accounts: readonly WorkBuddyWebPoolAccount[]
+}
+
+/** One pool account, described without any token material. */
+export interface WorkBuddyWebPoolAccount {
+  key: string
+  nickname?: string
+  disabled?: boolean
+  /** Whether this is the account currently being served. */
+  active: boolean
+  expiresAt?: number
+  /** The last check-in verdict, when one has been recorded. */
+  lastCheckinStatus?: string
+}

@@ -13,6 +13,7 @@ import type { WorkBuddyCredentialSource } from './pool-store.ts'
 import type { WorkBuddyUpstreamClient } from './upstream.ts'
 import { normalizeCredits } from './upstream.ts'
 import type { WorkBuddyModelInfo } from './catalog.ts'
+import type { WorkBuddyWebPoolSection } from './status-paths.ts'
 import { hostIsLoopback, originIsLoopback } from './loopback.ts'
 import { WORKBUDDY_STATUS_PATH } from './status-paths.ts'
 import type { WorkBuddyWebCatalog, WorkBuddyWebModelBadge, WorkBuddyWebProbeSection, WorkBuddyWebStatus, WorkBuddyWebVisibilitySection } from './status-paths.ts'
@@ -85,6 +86,24 @@ function loopbackRequest(req: IncomingMessage): boolean {
 }
 
 /**
+ * The pool section for the status document, or `undefined` when there is none.
+ *
+ * Reads through the optional `poolSection` member so the single-account store —
+ * which has no pool and no opinion — needs no change. An empty pool yields
+ * `undefined`, which is what keeps a never-imported install's card identical to
+ * the one it had before the pool existed.
+ */
+function poolSectionOf(store: WorkBuddyCredentialSource): WorkBuddyWebPoolSection | undefined {
+  try {
+    return store.poolSection?.()
+  } catch {
+    // A pool read is display-only: failing to describe it must never cost the
+    // card its sign-in state, credits, or model list.
+    return undefined
+  }
+}
+
+/**
  * Assemble the card's status document. Sign-in state is read-only; credit is
  * a live billing answer whose failure degrades to `creditsError` rather than
  * failing the whole document.
@@ -93,6 +112,11 @@ export async function workBuddyWebStatus(
   deps: WorkBuddyStatusRouteOptions,
 ): Promise<WorkBuddyWebStatus> {
   const authStatus = await deps.store.status()
+  // The pool section is read before the sign-in branch because it is meaningful
+  // in both: a user whose desktop sign-in lapsed but who has pooled accounts is
+  // served from the pool, and hiding the section exactly then would hide the
+  // reason their models still work.
+  const pool = poolSectionOf(deps.store)
   if (authStatus.state !== 'signed-in') {
     // A diagnosable sign-out (a credential for the *other* product, or an
     // unusable key helper) keeps its explanation: falling back to the generic
@@ -108,6 +132,7 @@ export async function workBuddyWebStatus(
       status: 'signed-out',
       ...authStatus.reason === undefined ? {} : { reason: authStatus.reason },
       ...authStatus.reasonCode === undefined ? {} : { reasonCode: authStatus.reasonCode },
+      ...pool === undefined ? {} : { pool },
     }
   }
   const status: WorkBuddyWebStatus = {
@@ -116,6 +141,7 @@ export async function workBuddyWebStatus(
     ...authStatus.domain === undefined || authStatus.domain === '' ? {} : { domain: authStatus.domain },
     ...authStatus.source === undefined ? {} : { source: authStatus.source },
     ...authStatus.expiresAtMs === undefined ? {} : { expiresAt: authStatus.expiresAtMs },
+    ...pool === undefined ? {} : { pool },
   }
   // Model facts ride the signed-in document so the card can show rates,
   // promos, and context capacity without touching the Models picker. The rate

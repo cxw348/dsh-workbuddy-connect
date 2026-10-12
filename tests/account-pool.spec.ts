@@ -753,6 +753,73 @@ describe('importing an encrypted desktop credential', () => {
   })
 })
 
+describe('poolSection: what the settings card renders', () => {
+  /**
+   * The card keys its whole pool block on this field's presence, so the two
+   * properties that matter are: an empty pool reports nothing (keeping a
+   * single-account card byte-identical to before the pool existed), and a
+   * populated one describes every account without leaking token material.
+   */
+  function resolverOver(accounts: WorkBuddyPoolCredential[]): WorkBuddyPoolCredentialResolver {
+    const pool = new WorkBuddyAccountPool({ path: join(tempDir(), 'p.json'), hashOf })
+    pool.merge(accounts)
+    return new WorkBuddyPoolCredentialResolver({
+      pool,
+      fallback: fakeFallback(),
+      refresh: async () => ({ accessToken: 'x' }),
+    })
+  }
+
+  it('reports nothing for an empty pool', () => {
+    expect(resolverOver([]).poolSection()).toBeUndefined()
+  })
+
+  it('describes every account and marks the active one', async () => {
+    const resolver = resolverOver([credential('c-1', 'AT-C1'), credential('c-2', 'AT-C2')])
+    const section = resolver.poolSection()!
+    expect(section.total).toBe(2)
+    expect(section.usable).toBe(2)
+    expect(section.retired).toBe(0)
+    expect(section.accounts.map(a => a.key)).toEqual(['c-1:', 'c-2:'])
+    // Exactly one account is the one being served.
+    expect(section.accounts.filter(a => a.active)).toHaveLength(1)
+    expect(section.accounts[0]!.active).toBe(true)
+  })
+
+  it('carries no token material', () => {
+    const resolver = resolverOver([credential('c-1', 'AT-SECRET-TOKEN')])
+    const serialized = JSON.stringify(resolver.poolSection())
+    expect(serialized).not.toContain('AT-SECRET-TOKEN')
+    expect(serialized).not.toContain('RT-AT-SECRET-TOKEN')
+  })
+
+  it('reflects disabled accounts and check-in verdicts', () => {
+    const pool = new WorkBuddyAccountPool({ path: join(tempDir(), 'p.json'), hashOf })
+    pool.merge([credential('c-1', 'AT-C1'), credential('c-2', 'AT-C2')])
+    pool.setDisabled('c-2:', true)
+    pool.markCheckin('c-1:', 'already')
+    const resolver = new WorkBuddyPoolCredentialResolver({
+      pool,
+      fallback: fakeFallback(),
+      refresh: async () => ({ accessToken: 'x' }),
+    })
+    const section = resolver.poolSection()!
+    expect(section.usable).toBe(1)
+    const second = section.accounts.find(a => a.key === 'c-2:')!
+    expect(second.disabled).toBe(true)
+    expect(section.accounts.find(a => a.key === 'c-1:')!.lastCheckinStatus).toBe('already')
+  })
+
+  it('counts accounts retired by a dead session', async () => {
+    const resolver = resolverOver([credential('c-1', 'AT-C1'), credential('c-2', 'AT-C2')])
+    const first = await resolver.current()
+    resolver.reportDead(first!, 'test')
+    expect(resolver.poolSection()!.retired).toBe(1)
+    // The retired account stays listed: the user needs to see which one died.
+    expect(resolver.poolSection()!.accounts).toHaveLength(2)
+  })
+})
+
 describe('WorkBuddyUpstreamClient.dailyCheckin', () => {
   /** Stub `fetch` and record every request the client makes. */
   function stubFetch(handler: (url: string, init: RequestInit) => { status: number; body: unknown }): string[] {
