@@ -299,18 +299,31 @@ export class WorkBuddyPoolCredentialResolver implements WorkBuddyCredentialSourc
    * does not accept an account from the caller, because "switch to an account
    * that does not exist" is not a state a request can be in.
    *
+   * The switch is **persisted**, not cursor-only: a choice the user made in the
+   * card must survive a restart, and a resolver-local cursor would forget it the
+   * moment DSH closed — presenting a switch that silently undoes itself. The
+   * move is the same reorder the CLI's `use` command performs, so a card press
+   * and a command are indistinguishable on disk.
+   *
    * Returns whether the switch happened, so the caller can report a refusal
    * (unknown key, disabled account) instead of reporting success for a no-op.
    */
-  prefer(key: string): boolean {
+  preferAccount(key: string): boolean {
     const entry = this.pool.get(key)
     if (entry === undefined || entry.disabled === true) return false
-    const index = this.pool.usable().findIndex(candidate => candidate.key === key)
+    const entries = this.pool.usable()
+    const index = entries.findIndex(candidate => candidate.key === key)
     if (index < 0) return false
-    this.cursor = index
     // A previously retired account that the user explicitly picks comes back:
     // they are overriding the rotation, which is the whole point.
     this.retired.delete(key)
+    // Persist the reorder first, then read the index back from the *new* order.
+    // Setting the cursor before the move would index into the old order and land
+    // on whichever account now occupies that slot — the switch would look
+    // successful while serving the account the user just moved away from.
+    this.pool.moveToFront(key)
+    this.cursor = this.pool.usable().findIndex(candidate => candidate.key === key)
+    if (this.cursor < 0) this.cursor = 0
     return true
   }
 

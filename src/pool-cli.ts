@@ -520,28 +520,20 @@ export async function commandCheckin(
   return auth > 0 ? 2 : failed > 0 ? 1 : 0
 }
 
-/** Move one entry to the front of the pool, so rotation reaches it first. */
-export function moveToFront(pool: WorkBuddyAccountPool, key: string): boolean {
-  const entries = pool.all() as WorkBuddyPoolEntry[]
-  const index = entries.findIndex(entry => entry.key === key)
-  if (index <= 0) return index === 0
-  const [entry] = entries.splice(index, 1)
-  entries.unshift(entry!)
-  pool.persist()
-  return true
-}
-
 /**
  * Make one pooled account the active credential.
  *
- * "Active" is positional rather than a stored flag: the resolver walks the pool
- * from a cursor, so the account the user picks is moved to the front and the
- * cursor is reset to it. A stored `active` field would have to be reconciled
- * against the cursor on every read and would go stale the moment another
- * account was retired.
+ * "Active" is positional rather than a stored flag: the pool is walked in order,
+ * so the account the user picks is moved to the front. A stored `active` field
+ * would have to be reconciled against the walk on every read and would go stale
+ * the moment another account was retired.
+ *
+ * The reorder is persisted through the pool itself, so a card press and a CLI
+ * command are indistinguishable on disk — and a choice survives a restart rather
+ * than silently undoing itself.
  *
  * `disabled` is honoured rather than bypassed: an account the user excluded stays
- * excluded, because a picker entry that resurrects it would make "disable"
+ * excluded, because a control that resurrects it would make "disable"
  * meaningless.
  *
  * Refusals come back as a `state`, matching how the other control actions
@@ -558,8 +550,7 @@ export function useAccount(
   if (entry.disabled === true) {
     return { state: 'refused', reason: `account ${account} is disabled; enable it first` }
   }
-  const moved = moveToFront(pool, account)
-  if (!moved) {
+  if (!pool.moveToFront(account)) {
     // Already at the front: still a success, because the user asked for that
     // account and that is what is active.
     return { state: 'ok', reason: `account ${account} is already active` }
@@ -586,10 +577,9 @@ export function commandEntry(pool: WorkBuddyAccountPool, action: string, key: st
       changed = pool.remove(key)
       break
     default:
-      // `use` moves the account to the front by rotating the array: the cursor is
-      // positional, so "make this the active account" is an ordering change, not
-      // a stored flag.
-      changed = moveToFront(pool, key)
+      // `use` moves the account to the front: the pool is walked in order, so
+      // "make this the active account" is an ordering change, not a stored flag.
+      changed = pool.moveToFront(key)
       break
   }
   const counts = pool.counts()

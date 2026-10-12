@@ -416,6 +416,25 @@ export class WorkBuddyAccountPool {
     return true
   }
 
+  /**
+   * Move one account to the front of the pool, so rotation reaches it first.
+   *
+   * Order *is* the active-account state in a pool, so this is how "use this
+   * account" is persisted: a stored `active` flag would have to be reconciled
+   * against the rotation cursor on every read and would go stale the moment
+   * another account was retired. Returns whether anything moved, so an
+   * already-front account reports "no change" rather than a false success.
+   */
+  moveToFront(key: string): boolean {
+    const entries = this.load()
+    const index = entries.findIndex(entry => entry.key === key)
+    if (index <= 0) return index === 0
+    const [entry] = entries.splice(index, 1)
+    entries.unshift(entry!)
+    this.persist()
+    return true
+  }
+
   /** Remove every account. */
   clear(): void {
     this.entries = []
