@@ -1,0 +1,73 @@
+name: wb-probe
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'probe target'
+        required: false
+        default: 'all'
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Egress identity
+        run: |
+          echo "===== egress ====="
+          curl -s -m 20 https://api.ipify.org || true; echo
+          curl -s -m 20 https://ipinfo.io/json || true; echo
+          echo "===== env ====="
+          uname -a; python3 -V
+
+      - name: Reachability matrix
+        run: |
+          echo "===== reachability ====="
+          for u in https://github.com/ https://github.com/signup https://github.com/join \
+                   https://accounts.google.com/ https://gmail.com/ \
+                   https://api.account.tencentid.com/ https://www.workbuddy.ai/ \
+                   https://account.tencentid.com/public/transfer/ \
+                   https://appleid.apple.com/ https://x.com/ ; do
+            code=$(curl -s -o /tmp/b -w '%{http_code}' -m 25 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36' "$u" || echo ERR)
+            size=$(stat -c%s /tmp/b 2>/dev/null || echo 0)
+            echo "$code  $size  $u"
+          done
+
+      - name: DataDome check on github signup
+        run: |
+          echo "===== github /signup body ====="
+          curl -s -m 30 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36' \
+            -H 'Accept: text/html,application/xhtml+xml' -H 'Accept-Language: en-US,en;q=0.9' \
+            https://github.com/signup -o /tmp/signup.html -w 'status=%{http_code} size=%{size_download}\n' || true
+          grep -o -i -E 'captcha-delivery|datadome|Please enable JS|Access is temporarily restricted|unusual activity' /tmp/signup.html | sort | uniq -c || echo "no datadome markers"
+          echo "--- has email input: $(grep -c -E 'name="user\[email\]"|id="email"' /tmp/signup.html || true)"
+
+      - name: WorkBuddy INTL social register from runner
+        run: |
+          echo "===== wb intl social ====="
+          python3 - <<'PY'
+          import json,urllib.request,urllib.error
+          def call(url,payload):
+              h={"Accept":"application/json","Content-Type":"application/json",
+                 "Origin":"https://account.tencentid.com","Referer":"https://account.tencentid.com/",
+                 "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/149.0.0.0 Safari/537.36"}
+              body=json.dumps(payload).encode()
+              try:
+                  req=urllib.request.Request(url,data=body,headers=h,method="POST")
+                  with urllib.request.urlopen(req,timeout=25) as r: return r.status,r.read().decode("utf8","replace")
+              except urllib.error.HTTPError as e: return e.code,e.read().decode("utf8","replace")
+              except Exception as e: return -1,"%s: %s"%(type(e).__name__,e)
+          for p in ("google","github"):
+              pl={"app":"codebuddy","client_mode":"widget","scene":"signup",
+                  "callback_uri":"https://account.tencentid.com/public/transfer/?connector=%s"%p,
+                  "scopes":["openid","profile","email"],"source_info":"{}","extra_param":"{}"}
+              st,b=call("https://api.account.tencentid.com/authz/v1/authn/social/%s/login"%p,pl)
+              print("### %s status=%s"%(p,st))
+              try:
+                  j=json.loads(b)
+                  if j.get("authorize_url"):
+                      print("  URL:",j["authorize_url"])
+                  else:
+                      print("  ",json.dumps(j,ensure_ascii=False)[:300])
+              except Exception:
+                  print("  raw:",b[:300])
+          PY
