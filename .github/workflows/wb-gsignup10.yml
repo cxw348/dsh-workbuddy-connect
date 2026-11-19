@@ -1,0 +1,98 @@
+name: wb-gsignup10
+on:
+  workflow_dispatch:
+jobs:
+  g:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - name: Install playwright
+        run: |
+          pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+      - name: Google signup password plus confirm
+        run: |
+          python3 - <<'PY'
+          import asyncio, json, random, string
+          from playwright.async_api import async_playwright
+          SIGNUP=("https://accounts.google.com/signup/v2/createaccount"
+                  "?flowName=GlifWebSignIn&flowEntry=SignUp")
+          def rnd(n=8): return "".join(random.choice(string.ascii_lowercase+string.digits) for _ in range(n))
+          LOCAL="wbauto"+rnd(7); PWD="Wb"+rnd(8)+"!7xQ"
+          async def body(pg,n=900):
+              try: return (await pg.inner_text("body"))[:n]
+              except Exception: return ""
+          async def click_sel(pg,sel):
+              el=await pg.query_selector(sel)
+              if not el: return False
+              await el.scroll_into_view_if_needed(); b=await el.bounding_box()
+              if not b: return False
+              await pg.mouse.click(b["x"]+b["width"]/2,b["y"]+b["height"]/2); return True
+          async def opts(pg):
+              return await pg.evaluate("""()=>{const o=[];document.querySelectorAll('[role=option]').forEach(e=>{
+                const r=e.getBoundingClientRect(); if(r.width===0||r.height===0)return;
+                o.push({t:(e.innerText||'').trim(),x:r.x+r.width/2,y:r.y+r.height/2});});return o;}""")
+          async def pick(pg,trig,want):
+              await click_sel(pg,trig); await pg.wait_for_timeout(900)
+              for x in await opts(pg):
+                  if x["t"].lower()==want.lower():
+                      await pg.mouse.click(x["x"],x["y"]); await pg.wait_for_timeout(600); return True
+              return False
+          async def next_btn(pg,tag=""):
+              bs=await pg.evaluate("""()=>[...document.querySelectorAll('button')].map(b=>{
+                const r=b.getBoundingClientRect();return {txt:(b.innerText||'').trim().slice(0,20),
+                  vis:r.width>0&&r.height>0,x:r.x+r.width/2,y:r.y+r.height/2};}).filter(b=>b.vis)""")
+              for b in bs:
+                  if b["txt"].lower()=="next":
+                      await pg.mouse.click(b["x"],b["y"]); await pg.wait_for_timeout(800)
+                      print(f"  next@{tag}",flush=True); return True
+              print(f"  NO_NEXT@{tag}",flush=True); return False
+          async def main():
+              async with async_playwright() as p:
+                  b=await p.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"])
+                  ctx=await b.new_context(locale="en-US",viewport={"width":1280,"height":900},
+                      user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
+                  pg=await ctx.new_page()
+                  await pg.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+                  await pg.goto(SIGNUP,wait_until="domcontentloaded",timeout=60000)
+                  await pg.wait_for_timeout(3500)
+                  await pg.fill("#firstName","Wei"); await pg.fill("#lastName","Chen")
+                  await next_btn(pg,"name"); await pg.wait_for_timeout(5000)
+                  await pick(pg,"#month","March")
+                  await pg.fill("#day","14"); await pg.fill("#year","1992")
+                  await pick(pg,"#gender","Male")
+                  await next_btn(pg,"bday"); await pg.wait_for_timeout(6000)
+                  if await pg.query_selector("input[name=Username]"):
+                      await pg.fill("input[name=Username]",LOCAL)
+                      await next_btn(pg,"uname"); await pg.wait_for_timeout(7000)
+                  print("PWD_PAGE=",json.dumps(await body(pg,300),ensure_ascii=False),flush=True)
+                  # 密码页：把页面上所有 visible password input 都填上同一个值
+                  n=await pg.evaluate("""(v)=>{
+                    const es=[...document.querySelectorAll('input[type=password]')];
+                    let c=0;
+                    es.forEach(e=>{const r=e.getBoundingClientRect();
+                      if(r.width>0&&r.height>0){e.focus();e.value=v;
+                        e.dispatchEvent(new Event('input',{bubbles:true}));
+                        e.dispatchEvent(new Event('change',{bubbles:true}));c++;}});
+                    return {total:es.length,filled:c};}""", PWD)
+                  print("  pwd_filled=",json.dumps(n),flush=True)
+                  # 用 Playwright 再确认一次（React 需要真实键入）
+                  els=await pg.query_selector_all("input[type=password]")
+                  for i,e in enumerate(els):
+                      try:
+                          bb=await e.bounding_box()
+                          if bb and bb["width"]>0:
+                              await e.click(); await pg.keyboard.type(PWD,delay=40)
+                              print(f"  typed_pwd#{i}",flush=True)
+                      except Exception as ex: print(f"  type#{i}_fail {type(ex).__name__}",flush=True)
+                  await pg.wait_for_timeout(800)
+                  await next_btn(pg,"pwd"); await pg.wait_for_timeout(15000)
+                  print("AFTER_PWD=",json.dumps({"url":pg.url[:150],"body":await body(pg,900)},ensure_ascii=False),flush=True)
+                  print("CREDS=",json.dumps({"email":LOCAL+"@gmail.com","pwd":PWD}),flush=True)
+                  print("FINAL_URL=",pg.url[:250],flush=True)
+                  print("FINAL_BODY=",json.dumps(await body(pg,1200),ensure_ascii=False),flush=True)
+                  await b.close()
+          asyncio.run(main())
+          PY
