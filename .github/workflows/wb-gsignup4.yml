@@ -1,0 +1,146 @@
+name: wb-gsignup4
+on:
+  workflow_dispatch:
+jobs:
+  google:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - name: Install playwright
+        run: |
+          pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+      - name: Google signup via mouse-coordinate widgets, go to the end
+        run: |
+          python3 - <<'PY'
+          import asyncio, json, random, string
+          from playwright.async_api import async_playwright
+          SIGNUP=("https://accounts.google.com/signup/v2/createaccount"
+                  "?flowName=GlifWebSignIn&flowEntry=SignUp")
+          def rnd(n=10): return "".join(random.choice(string.ascii_lowercase+string.digits) for _ in range(n))
+          async def body(pg,n=500):
+              try: return (await pg.inner_text("body"))[:n]
+              except Exception: return ""
+          async def click_el(pg, sel):
+              """用鼠标坐标点击，绕开 Loading 遮罩"""
+              el = await pg.query_selector(sel)
+              if not el: return None
+              await el.scroll_into_view_if_needed()
+              box = await el.bounding_box()
+              if not box: return None
+              await pg.mouse.click(box["x"]+box["width"]/2, box["y"]+box["height"]/2)
+              return box
+          async def options(pg):
+              return await pg.evaluate("""() => {
+                const o=[];
+                document.querySelectorAll('[role=option],li[role=option],div[role=option],[jsname=V42w5b]').forEach(e=>{
+                  const r=e.getBoundingClientRect();
+                  if(r.width===0||r.height===0) return;
+                  o.push({txt:(e.innerText||'').trim().slice(0,15), x:r.x+r.width/2, y:r.y+r.height/2,
+                          role:e.getAttribute('role'), jsname:e.getAttribute('jsname')});
+                });
+                return o;
+              }""")
+          async def pick(pg, trig_sel, want):
+              b = await click_el(pg, trig_sel)
+              print(f"  click {trig_sel} box={bool(b)}", flush=True)
+              await pg.wait_for_timeout(900)
+              opts = await options(pg)
+              print(f"  opts({len(opts)})=", json.dumps(opts[:14], ensure_ascii=False), flush=True)
+              for o in opts:
+                  if want.lower() in o["txt"].lower() or o["txt"] == want:
+                      await pg.mouse.click(o["x"], o["y"]); await pg.wait_for_timeout(700)
+                      print(f"  picked {want} <- '{o['txt']}'", flush=True); return True
+              return False
+          async def main():
+              async with async_playwright() as p:
+                  b=await p.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"])
+                  ctx=await b.new_context(locale="en-US",
+                      user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
+                  pg=await ctx.new_page()
+                  await pg.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+                  await pg.goto(SIGNUP,wait_until="domcontentloaded",timeout=60000)
+                  await pg.wait_for_timeout(3500)
+                  await pg.fill("#firstName","Wei"); await pg.fill("#lastName","Chen")
+                  await pg.click("#collectNameNext button",timeout=10000)
+                  await pg.wait_for_timeout(5000)
+                  ids=await pg.evaluate("""() => [...document.querySelectorAll('[id]')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0}).map(e=>e.id).slice(0,40)""")
+                  print("IDS=",json.dumps(ids),flush=True)
+                  for sel,want in (("#month","March"),("#day","14"),("#year","1992")):
+                      print(f"== {sel} ==",flush=True)
+                      await pick(pg, sel, want)
+                  print("== gender ==",flush=True)
+                  gbtn = await pg.query_selector("div[role=combobox]:not(#month)")
+                  print("  genderCombo=",bool(gbtn),flush=True)
+                  await pick(pg, "#gender", "Male")
+                  print("AFTER_FILL=",json.dumps(await body(pg,260),ensure_ascii=False),flush=True)
+                  try: await pg.click("#birthdaygenderNext button",timeout=8000)
+                  except Exception as e: print("  nextFail",type(e).__name__,flush=True)
+                  await pg.wait_for_timeout(6000)
+                  print("AFTER_NEXT=",json.dumps({"url":pg.url[:130],
+                      "hasU":bool(await pg.query_selector("input[name=Username]")),
+                      "body":await body(pg,320)},ensure_ascii=False),flush=True)
+                  # 若进到用户名页，继续填
+                  if await pg.query_selector("input[name=Username]"):
+                      await pg.fill("input[name=Username]", "wx"+rnd(9))
+                      try: await pg.click("#usernameNext button",timeout=8000)
+                      except Exception as e: print("  unFail",type(e).__name__,flush=True)
+                      await pg.wait_for_timeout(5000)
+                      print("AFTER_USER=",json.dumps({"url":pg.url[:130],
+                          "hasPwd":bool(await pg.query_selector("input[name=Passwd],input[type=password]")),
+                          "body":await body(pg,320)},ensure_ascii=False),flush=True)
+                      if await pg.query_selector("input[name=Passwd]"):
+                          pw="Xx"+rnd(8)+"!9"
+                          await pg.fill("input[name=Passwd]", pw)
+                          try: await pg.click("#passwdNext button",timeout=8000)
+                          except Exception as e: print("  pwFail",type(e).__name__,flush=True)
+                          await pg.wait_for_timeout(7000)
+                          print("AFTER_PWD=",json.dumps({"url":pg.url[:130],"body":await body(pg,500)},ensure_ascii=False),flush=True)
+                  await pg.screenshot(path="/tmp/g.png", full_page=False)
+                  await b.close()
+          asyncio.run(main())
+          PY
+  github:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - name: Install playwright
+        run: |
+          pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+      - name: GitHub signup with OAuth-page cookies
+        run: |
+          python3 - <<'PY'
+          import asyncio, json
+          from playwright.async_api import async_playwright
+          AUTH=("https://github.com/login/oauth/authorize?allow_signup=true"
+                "&client_id=Iv23liqNab23Foc1AG5e&prompt=select_account"
+                "&redirect_uri=https%3A%2F%2Faccount.tencentid.com%2Fpublic%2Ftransfer%2F%3Fconnector%3Dgithub"
+                "&scope=read%3Auser+user%3Aemail&state=teststate123")
+          async def main():
+              async with async_playwright() as p:
+                  b=await p.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"])
+                  ctx=await b.new_context(locale="en-US",
+                      user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
+                  pg=await ctx.new_page()
+                  await pg.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+                  r=await pg.goto(AUTH,wait_until="domcontentloaded",timeout=60000)
+                  await pg.wait_for_timeout(2500)
+                  print("AUTH status=",r.status if r else None,"url=",pg.url[:120],flush=True)
+                  ck=await ctx.cookies()
+                  print("COOKIES=",[c["name"] for c in ck],flush=True)
+                  # 带着这批 cookie 再打 /signup
+                  r2=await pg.goto("https://github.com/signup?return_to=%2Flogin%2Foauth%2Fauthorize",wait_until="domcontentloaded",timeout=60000)
+                  await pg.wait_for_timeout(3000)
+                  h=await pg.content()
+                  print("SIGNUP status=",r2.status if r2 else None,"len=",len(h),flush=True)
+                  print("SIGNUP marks=",{"email":('id="email"' in h),"dd":("datadome" in h.lower()),
+                                          "iframe":len(await pg.query_selector_all("iframe"))},flush=True)
+                  print("SIGNUP body=",json.dumps((await pg.inner_text("body"))[:300],ensure_ascii=False),flush=True)
+                  await b.close()
+          asyncio.run(main())
+          PY
