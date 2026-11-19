@@ -1,0 +1,120 @@
+name: wb-gsignup5
+on:
+  workflow_dispatch:
+jobs:
+  g:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - name: Install playwright
+        run: |
+          pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+      - name: Google signup end-to-end drive
+        env:
+          GMAIL_LOCAL: wbauto1123a
+        run: |
+          python3 - <<'PY'
+          import asyncio, json, os, random, string
+          from playwright.async_api import async_playwright
+          SIGNUP=("https://accounts.google.com/signup/v2/createaccount"
+                  "?flowName=GlifWebSignIn&flowEntry=SignUp")
+          LOCAL=os.environ["GMAIL_LOCAL"]
+          def rnd(n=8): return "".join(random.choice(string.ascii_lowercase+string.digits) for _ in range(n))
+          PWD="Wb"+rnd(9)+"!7x"
+          async def body(pg,n=400):
+              try: return (await pg.inner_text("body"))[:n]
+              except Exception: return ""
+          async def snap(pg,tag):
+              print(f"@@{tag}=",json.dumps({"url":pg.url[:120],"body":await body(pg,420)},ensure_ascii=False),flush=True)
+          async def click_sel(pg,sel):
+              el=await pg.query_selector(sel)
+              if not el: return False
+              await el.scroll_into_view_if_needed()
+              b=await el.bounding_box()
+              if not b: return False
+              await pg.mouse.click(b["x"]+b["width"]/2,b["y"]+b["height"]/2)
+              return True
+          async def opts(pg):
+              return await pg.evaluate("""() => {const o=[];
+                document.querySelectorAll('[role=option]').forEach(e=>{const r=e.getBoundingClientRect();
+                  if(r.width===0||r.height===0)return;
+                  o.push({t:(e.innerText||'').trim(),x:r.x+r.width/2,y:r.y+r.height/2});});
+                return o;}""")
+          async def pick(pg,trig,want):
+              await click_sel(pg,trig); await pg.wait_for_timeout(900)
+              o=await opts(pg)
+              print(f"  {trig} options={len(o)}",flush=True)
+              for x in o:
+                  if x["t"].lower()==want.lower():
+                      await pg.mouse.click(x["x"],x["y"]); await pg.wait_for_timeout(700)
+                      print(f"  picked {trig} = {x['t']}",flush=True); return True
+              for x in o:
+                  if want.lower() in x["t"].lower():
+                      await pg.mouse.click(x["x"],x["y"]); await pg.wait_for_timeout(700)
+                      print(f"  picked~ {trig} = {x['t']}",flush=True); return True
+              return False
+          async def type_into(pg,sel,val):
+              if not await click_sel(pg,sel): return False
+              await pg.wait_for_timeout(400)
+              await pg.keyboard.type(val,delay=80)
+              await pg.wait_for_timeout(400)
+              await pg.keyboard.press("Tab")
+              await pg.wait_for_timeout(500)
+              print(f"  typed {sel}={val}",flush=True); return True
+          async def main():
+              async with async_playwright() as p:
+                  b=await p.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"])
+                  ctx=await b.new_context(locale="en-US",viewport={"width":1280,"height":900},
+                      user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
+                  pg=await ctx.new_page()
+                  await pg.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+                  r=await pg.goto(SIGNUP,wait_until="domcontentloaded",timeout=60000)
+                  print("start=",r.status if r else None,flush=True)
+                  await pg.wait_for_timeout(3500)
+                  await snap(pg,"NAME_PAGE")
+                  await pg.fill("#firstName","Wei"); await pg.fill("#lastName","Chen")
+                  await pg.click("#collectNameNext button",timeout=10000)
+                  await pg.wait_for_timeout(5000)
+                  await snap(pg,"BDAY_PAGE")
+                  await pick(pg,"#month","March")
+                  await type_into(pg,"#day","14")
+                  await type_into(pg,"#year","1992")
+                  await pick(pg,"#gender","Male")
+                  await snap(pg,"BDAY_FILLED")
+                  try: await pg.click("#birthdaygenderNext button",timeout=8000)
+                  except Exception as e: print("  bdNext",type(e).__name__,flush=True)
+                  await pg.wait_for_timeout(6000)
+                  await snap(pg,"AFTER_BDAY")
+                  # 用户名页
+                  if await pg.query_selector("input[name=Username]"):
+                      await pg.fill("input[name=Username]", LOCAL+rnd(4))
+                      print("  uname=",await pg.input_value("input[name=Username]"),flush=True)
+                      for sel in ("#usernameNext button","button[jsname=OCklVe]"):
+                          try:
+                              await pg.click(sel,timeout=6000); break
+                          except Exception: pass
+                      await pg.wait_for_timeout(6000)
+                      await snap(pg,"AFTER_UNAME")
+                  # 密码页
+                  pwsel=None
+                  for s in ("input[name=Passwd]","input[type=password]"):
+                      if await pg.query_selector(s): pwsel=s; break
+                  if pwsel:
+                      await pg.fill(pwsel,PWD)
+                      print("  pwd set len=",len(PWD),flush=True)
+                      for sel in ("#passwdNext button","button[jsname=OCklVe]"):
+                          try:
+                              await pg.click(sel,timeout=6000); break
+                          except Exception: pass
+                      await pg.wait_for_timeout(8000)
+                      await snap(pg,"AFTER_PWD")
+                  print("FINAL_URL=",pg.url[:200],flush=True)
+                  print("FINAL_BODY=",json.dumps(await body(pg,700),ensure_ascii=False),flush=True)
+                  try: await pg.screenshot(path="/tmp/final.png",full_page=True)
+                  except Exception: pass
+                  await b.close()
+          asyncio.run(main())
+          PY
