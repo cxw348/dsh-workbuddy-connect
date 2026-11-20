@@ -1,0 +1,36 @@
+name: pxbrowse
+on:
+  workflow_dispatch:
+    inputs:
+      budget_min:
+        description: minutes budget
+        default: "280"
+      max_proxies:
+        description: max proxies to browse
+        default: "300"
+jobs:
+  browse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install
+        run: |
+          python -m pip install -q playwright
+          python -m playwright install --with-deps chromium
+      - name: browse
+        env:
+          BROWSE_BUDGET_MIN: ${{ inputs.budget_min }}
+          MAX_PROXIES: ${{ inputs.max_proxies }}
+          MAIL_DOMAIN: example.com
+        run: python scripts/px_browser.py
+      - name: artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prox-browse
+          path: prox_browse.jsonl
+          if-no-files-found: warn
