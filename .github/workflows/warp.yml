@@ -1,0 +1,44 @@
+name: warp
+on:
+  workflow_dispatch:
+jobs:
+  warp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: baseline
+        run: |
+          echo "=== direct egress ==="
+          curl -sS -m 20 https://api.ipify.org; echo
+          curl -sS -m 20 "https://api.ip.sb/geoip" ; echo
+          echo "=== direct /signup ==="
+          curl -sS -m 25 -o /tmp/d.html -w "status=%{http_code} size=%{size_download}\n" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36" \
+            https://github.com/signup || true
+          grep -c 'id="email"' /tmp/d.html || true
+
+      - name: get warp-plus
+        run: |
+          set -e
+          curl -sSL -o wp.zip https://github.com/bepass-org/warp-plus/releases/latest/download/warp-plus_linux-amd64.zip || \
+          curl -sSL -o wp.zip https://github.com/bepass-org/warp-plus/releases/download/v1.2.7/warp-plus_linux-amd64.zip
+          ls -l wp.zip
+          python3 -c "import zipfile;zipfile.ZipFile('wp.zip').extractall('.')"
+          chmod +x warp-plus || true
+          ls -l warp-plus || ls -l
+
+      - name: run warp-plus
+        run: |
+          nohup ./warp-plus --bind 127.0.0.1:8086 --gool=false > /tmp/wp.log 2>&1 &
+          sleep 25
+          tail -30 /tmp/wp.log || true
+          echo "=== through warp ==="
+          curl -sS -m 25 -x socks5h://127.0.0.1:8086 https://api.ipify.org || echo "NOEGRESS"
+          echo
+          curl -sS -m 25 -x socks5h://127.0.0.1:8086 "https://cloudflare.com/cdn-cgi/trace" || true
+          echo "=== warp /signup ==="
+          curl -sS -m 30 -x socks5h://127.0.0.1:8086 -o /tmp/w.html -w "status=%{http_code} size=%{size_download}\n" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36" \
+            https://github.com/signup || true
+          grep -c 'id="email"' /tmp/w.html || true
+          head -c 300 /tmp/w.html || true
