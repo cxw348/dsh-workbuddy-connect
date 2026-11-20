@@ -1,0 +1,24 @@
+name: nativeseq
+on: workflow_dispatch
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install -q playwright
+          python -m playwright install --with-deps chromium
+      - run: curl -s https://api.ipify.org; echo; curl -s https://api.ip.sb/geoip || true; echo
+      - run: python scripts/native_seq.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nativeseq
+          path: |
+            native_seq.json
+            native_after.png
+          if-no-files-found: warn
