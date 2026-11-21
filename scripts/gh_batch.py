@@ -127,6 +127,52 @@ def wait_code(jwt, since=0.0, timeout=180, poll=4):
 # ---------------- browser ----------------
 
 
+def open_form(page):
+    page.goto("https://github.com/", wait_until="commit")
+    time.sleep(5)
+    try:
+        page.goto("https://github.com/signup", wait_until="commit")
+    except Exception:  # noqa: BLE001
+        pass
+    time.sleep(3)
+    page.goto("https://github.com/", wait_until="commit")
+    time.sleep(4)
+    clicked = False
+    for sel in ("a[href*='/signup']", "a:has-text('Sign up')"):
+        try:
+            if page.locator(sel).count():
+                page.locator(sel).first.click()
+                clicked = True
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    if not clicked:
+        return False
+    for _ in range(50):
+        try:
+            if page.locator("#email").count():
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(2)
+    return False
+
+
+def wait_email_ok(page, tries=8):
+    """GitHub 会异步校验邮箱，期间 validationMessage='Verifying…'。"""
+    for i in range(tries):
+        v = page.evaluate("""() => {
+            const e=document.querySelector('input[name="user[email]"]');
+            if(!e) return {ok:false, msg:'no-input'};
+            return {ok:e.checkValidity(), msg:e.validationMessage||''};
+        }""")
+        if v.get("ok"):
+            return True, v.get("msg", "")
+        print(f"    [email] {v.get('msg')!r} retry {i+1}/{tries}", flush=True)
+        time.sleep(3)
+    return False, v.get("msg", "")
+
+
 def try_once(seed, idx, port):
     from invisible_playwright import InvisiblePlaywright
 
