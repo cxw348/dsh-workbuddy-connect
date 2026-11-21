@@ -1,0 +1,38 @@
+name: netdiag2
+on: { workflow_dispatch: {} }
+jobs:
+  d:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: pip
+        run: pip install --quiet invisible_playwright
+      - name: before
+        run: |
+          python3 - <<'PY'
+          import urllib.request, os
+          print('env before:', {k:v for k,v in os.environ.items() if 'proxy' in k.lower()})
+          try:
+              with urllib.request.urlopen('https://api.mail.tm/domains', timeout=20) as r:
+                  print('before import:', r.status, len(r.read()))
+          except Exception as e:
+              print('before import ERR', repr(e)[:200])
+          PY
+      - name: after
+        run: |
+          python3 - <<'PY'
+          import os
+          before = {k:v for k,v in os.environ.items() if 'proxy' in k.lower()}
+          import invisible_playwright
+          after = {k:v for k,v in os.environ.items() if 'proxy' in k.lower()}
+          print('env before:', before)
+          print('env after import:', after)
+          print('diff:', {k:v for k,v in after.items() if before.get(k)!=v})
+          import urllib.request
+          try:
+              with urllib.request.urlopen('https://api.mail.tm/domains', timeout=20) as r:
+                  print('after import:', r.status, len(r.read()))
+          except Exception as e:
+              print('after import ERR', repr(e)[:250])
+          PY
