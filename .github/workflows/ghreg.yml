@@ -1,0 +1,33 @@
+name: ghreg
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: how many accounts
+        default: '1'
+jobs:
+  reg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: deps
+        run: |
+          pip install --quiet playwright invisible_playwright requests
+          python -m playwright install --with-deps firefox
+      - name: ip
+        run: curl -s --max-time 15 https://api.ip.sb/geoip || true
+      - name: run
+        env:
+          GH_COUNT: ${{ inputs.count }}
+        run: python scripts/gh_batch.py --count "$GH_COUNT" --max-tries 6
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ghreg-out
+          path: |
+            scripts/gh_batch.json
+            scripts/*.png
