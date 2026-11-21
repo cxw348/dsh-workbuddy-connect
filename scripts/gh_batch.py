@@ -435,9 +435,10 @@ def main():
             try:
                 r = try_once(seed, idx, port)
             except Exception:  # noqa: BLE001
+                tb = traceback.format_exc()
                 r = {"idx": idx, "seed": seed, "result": "EXCEPTION",
-                     "trace": traceback.format_exc()[-600:]}
-                print(f"  [EXC] {r['trace'][-200:]}", flush=True)
+                     "trace": tb[-2000:]}
+                print("  [EXC-FULL]\n" + tb, flush=True)
             results.append(r)
             with open(DOC, "w", encoding="utf-8") as f:
                 json.dump({"accounts": results}, f, ensure_ascii=False, indent=2)
