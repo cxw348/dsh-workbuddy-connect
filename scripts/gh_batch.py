@@ -91,6 +91,13 @@ def new_mailbox(prefix="gh"):
 
 
 def wait_code(jwt, since=0.0, timeout=180, poll=4):
+    """取 GitHub launch code。
+
+    2026-11-21 实测：GitHub 的 launch code 是 **8 位**（如 29974387），
+    邮件正文锚点是「entering the code below:\n\n<8位>」。
+    此前只抓 6 位，导致把前 6 位填进 OTP → 账号从未真正激活 → 登录报
+    Incorrect username or password、github.com/<uname> 404。
+    """
     t0 = time.time()
     while time.time() - t0 < timeout:
         try:
@@ -114,8 +121,11 @@ def wait_code(jwt, since=0.0, timeout=180, poll=4):
                     pass
             blob = "\n".join(str(m.get(k, "")) for k in
                              ("subject", "preview", "raw", "text"))
-            for pat in (r"verification code is[^0-9]{0,60}(\d{6})",
-                        r"code[^0-9]{0,40}(\d{6})",
+            # 顺序很重要：先锚 8 位（真码），再退回 6 位兼容旧邮件
+            for pat in (r"code below[:\s]*?(\d{8})",
+                        r"launch code[^0-9]{0,60}(\d{8})",
+                        r"\b(\d{8})\b",
+                        r"verification code is[^0-9]{0,60}(\d{6})",
                         r"\b(\d{6})\b"):
                 mm = re.search(pat, blob, re.I)
                 if mm:
@@ -284,10 +294,16 @@ def try_once(seed, idx, port):
         time.sleep(6)
         rec["submit"] = {"how": how, **got}
 
+        # === 「已进入验证码页」的判据必须是 DOM，不是 URL ===
+        # 2026-11-21 实测：POST 302 后 GitHub 的注册 SPA 会把 URL 留在
+        # https://github.com/signup?ref_cta=... ，但 DOM 已切成 8 格 launch_code[] 验证码界面。
+        # 用 URL 判会得到 confirmed=False 而误判 POST_FAILED。
         body = page.content()
-        confirmed_page = ("Confirm your email" in body) or ("confirm" in page.url.lower())
-        print(f"  [submit] status={got.get('status')} confirm={confirmed_page} "
-              f"url={page.url[:70]}", flush=True)
+        n_launch = page.locator("input#launch-code-0, input[name='launch_code[]']").count()
+        confirmed_page = n_launch > 0 or ("Confirm your email" in body)
+        rec["launch_boxes_on_confirm"] = n_launch
+        print(f"  [submit] status={got.get('status')} otp_boxes={n_launch} "
+              f"confirm={confirmed_page} url={page.url[:60]}", flush=True)
         try:
             page.screenshot(path=os.path.join(SHOT, f"a{idx}.png"))
         except Exception:  # noqa: BLE001
@@ -306,32 +322,67 @@ def try_once(seed, idx, port):
             rec["result"] = "NO_CODE"
             return rec
 
+        # === OTP 填写（2026-11-21 实测 DOM）===
+        # /account_verifications 是 8 个单字符 input：name="launch_code[]"，id="launch-code-0..7"
+        # 提交按钮文本 "Continue"（type=submit），旁边还有 "Resend the code"。
+        # 旧写法只填 'input[name=verification_code]'（不存在）→ filled=False → 账号从未激活。
         filled = False
-        for sel in ("input[name='verification_code']",
-                    "input[autocomplete='one-time-code']",
-                    "#launch-code-0"):
-            try:
-                if page.locator(sel).count():
-                    page.locator(sel).first.click()
-                    page.keyboard.type(code, delay=80)
-                    filled = True
-                    break
-            except Exception:  # noqa: BLE001
-                continue
+        try:
+            boxes = page.locator("input#launch-code-0, input[name='launch_code[]']")
+            n = boxes.count()
+            if n:
+                first = boxes.first
+                first.click()
+                page.keyboard.type(code, delay=90)   # 8 位逐格自动跳转
+                time.sleep(1.0)
+                filled = True
+        except Exception:  # noqa: BLE001
+            filled = False
+        rec["otp_boxes"] = n if isinstance(locals().get("n"), int) else 0
         rec["code_filled"] = filled
+        print(f"  [otp] boxes={rec['otp_boxes']} filled={filled}", flush=True)
         if filled:
-            for sel in ("button:has-text('Verify')", "button[type='submit']",
+            clicked = False
+            for sel in ("button:has-text('Continue')",
+                        "button[type='submit']",
                         "input[type='submit']"):
                 try:
                     if page.locator(sel).count():
                         page.locator(sel).first.click()
+                        clicked = True
                         break
                 except Exception:  # noqa: BLE001
                     continue
-            time.sleep(12)
+            rec["otp_submitted"] = clicked
+            print(f"  [otp] submitted={clicked}", flush=True)
+            time.sleep(14)
 
+        # === 真登录态判据：直接访问只有登录用户能看的页面 ===
+        # 2026-11-21 教训：URL 停在 signup 不代表没建成；反过来跳到 /account_verifications
+        # 也不代表建成了（旧版就是因为没填对 OTP 而假成功）。
+        rec["url_after_otp"] = page.url
+        verified = False
+        try:
+            page.goto("https://github.com/settings/profile", wait_until="commit")
+            time.sleep(4)
+            t = page.inner_text("body")[:4000]
+            rec["settings_url"] = page.url
+            rec["settings_len"] = len(t)
+            low = t.lower()
+            has_login = ("sign in to github" in low) or ("incorrect username" in low)
+            verified = (not has_login) and ("profile" in low or "public profile" in low
+                                            or "settings" in low)
+            rec["settings_head"] = t[:200]
+        except Exception as e:  # noqa: BLE001
+            rec["settings_err"] = f"{type(e).__name__}: {e}"
+        rec["verified_login"] = verified
         rec["final_url"] = page.url
-        rec["result"] = "SESSION_OK" if "signup" not in page.url.lower() else "UNCONFIRMED"
+        if verified:
+            rec["result"] = "ACCOUNT_LIVE"
+        elif rec.get("code_filled"):
+            rec["result"] = "OTP_SUBMITTED_UNVERIFIED"
+        else:
+            rec["result"] = "UNCONFIRMED"
         try:
             rec["final_text"] = page.inner_text("body")[:260]
         except Exception:  # noqa: BLE001
@@ -375,11 +426,14 @@ def main():
             results.append(r)
             with open(DOC, "w", encoding="utf-8") as f:
                 json.dump({"accounts": results}, f, ensure_ascii=False, indent=2)
-            if r.get("result") in ("SESSION_OK", "UNCONFIRMED"):
+            # 只有 ACCOUNT_LIVE（真登录态已验证）才计入成功
+            if r.get("result") == "ACCOUNT_LIVE":
                 ok_run = True
                 made += 1
-                print(f"  ==> 成功 #{made}: {r.get('email')} ({r['result']})", flush=True)
+                print(f"  ==> 成功 #{made}: {r.get('email')} {r.get('uname')}", flush=True)
                 break
+            if r.get("result") == "OTP_SUBMITTED_UNVERIFIED":
+                print(f"  ==> OTP 已提交但未验证登录态，继续换出口", flush=True)
             print(f"  ==> 失败: {r.get('result')}，换出口重试", flush=True)
             time.sleep(random.randint(10, 25))
         if not ok_run:
