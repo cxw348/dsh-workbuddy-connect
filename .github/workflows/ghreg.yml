@@ -2,12 +2,18 @@ name: ghreg
 on:
   workflow_dispatch:
     inputs:
+      mail:
+        description: "cf | mailtm"
+        required: false
+        default: "cf"
       count:
         description: how many accounts
         default: '1'
 jobs:
   reg:
     runs-on: ubuntu-latest
+    env:
+      GH_MAIL: ${{ inputs.mail }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
