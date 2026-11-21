@@ -36,8 +36,7 @@ import traceback
 import urllib.request
 
 OUT = os.path.dirname(os.path.abspath(__file__))
-os.environ.setdefault("HTTP_PROXY", "http://127.0.0.1:21014")
-os.environ.setdefault("HTTPS_PROXY", "http://127.0.0.1:21014")
+# runner 版：不设任何代理环境变量（invisible_playwright 引擎首次下载才需要，已预装）
 DOC = os.path.join(OUT, "gh_batch.json")
 SHOT = os.path.join(OUT, "shots_batch")
 os.makedirs(SHOT, exist_ok=True)
