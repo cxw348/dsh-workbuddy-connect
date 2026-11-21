@@ -134,6 +134,77 @@ def wait_code(jwt, since=0.0, timeout=180, poll=4):
     return None, None
 
 
+
+# ================= mail provider 切换（2026-11-21） =================
+# 动机：CF 邮箱域名 tbrmail548.dpdns.org 属于 dpdns.org 后缀，Obsidian 台账记录
+# 该后缀在 GitHub 的邮箱黑名单里（内网子域 35 个）。要验证「邮箱域」是不是
+# suspended 的成因，必须能换域。
+# GH_MAIL=mailtm 时改用 mail.tm 的 euploading.com。
+MAIL_PROVIDER = os.environ.get("GH_MAIL", "cf").lower()
+MAILTM = "https://api.mail.tm"
+MAILTM_PWD = "Wb!Mailtm2026x"
+
+
+def _mtm_req(url, data=None, token=None, method=None):
+    h = {"User-Agent": UA, "Content-Type": "application/json"}
+    if token:
+        h["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(url, data=data, headers=h, method=method)
+    with urllib.request.urlopen(req, timeout=40) as r:
+        return json.loads(r.read())
+
+
+def new_mailbox_mailtm(prefix="gh"):
+    addr = prefix + "".join(random.choices(string.ascii_lowercase + string.digits, k=10)) \
+        + "@euploading.com"
+    _mtm_req(f"{MAILTM}/accounts",
+             json.dumps({"address": addr, "password": MAILTM_PWD}).encode())
+    tk = _mtm_req(f"{MAILTM}/token",
+                  json.dumps({"address": addr, "password": MAILTM_PWD}).encode())
+    try:
+        _mtm_req(f"{MAILTM}/me", token=tk["token"], method="PATCH")
+    except Exception:  # noqa: BLE001
+        pass
+    return {"address": addr, "jwt": tk["token"], "provider": "mailtm"}
+
+
+def wait_code_mailtm(jwt, since=0.0, timeout=180, poll=4):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            d = _mtm_req(f"{MAILTM}/messages?page=1", token=jwt)
+            items = d.get("hydra:member", d if isinstance(d, list) else [])
+        except Exception as e:  # noqa: BLE001
+            print(f"    [mailtm] {type(e).__name__}", flush=True)
+            time.sleep(poll)
+            continue
+        for m in items:
+            try:
+                full = _mtm_req(f"{MAILTM}/messages/{m['id']}", token=jwt)
+            except Exception:  # noqa: BLE001
+                continue
+            blob = "\n".join(str(full.get(k, "")) for k in ("subject", "intro", "text"))
+            for pat in (r"code below[:\s]*?(\d{8})", r"\b(\d{8})\b",
+                        r"\b(\d{6})\b"):
+                mm = re.search(pat, blob, re.I)
+                if mm:
+                    return mm.group(1), full.get("subject", "")
+        time.sleep(poll)
+    return None, None
+
+
+def new_mailbox_dispatch(prefix="gh"):
+    if MAIL_PROVIDER == "mailtm":
+        return new_mailbox_mailtm(prefix)
+    return new_mailbox(prefix)
+
+
+def wait_code_dispatch(jwt, **kw):
+    if MAIL_PROVIDER == "mailtm":
+        return wait_code_mailtm(jwt, **kw)
+    return wait_code(jwt, **kw)
+
+
 # ---------------- browser ----------------
 
 
@@ -188,7 +259,7 @@ def try_once(seed, idx, port):
 
     proxy = None if not port else f"http://127.0.0.1:{port}"
     rec = {"idx": idx, "seed": seed, "proxy": proxy}
-    mb = new_mailbox()
+    mb = new_mailbox_dispatch()
     email, jwt = mb["address"], mb["jwt"]
     uname = "wb" + "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
     pwd = "Wb!" + "".join(random.choices(string.ascii_letters + string.digits, k=15))
@@ -315,7 +386,7 @@ def try_once(seed, idx, port):
             return rec
 
         print("  [code] waiting...", flush=True)
-        code, subj = wait_code(jwt, since=t_mail)
+        code, subj = wait_code_dispatch(jwt, since=t_mail)
         rec["code"] = code
         print(f"  [code] {code} subj={(subj or '')[:50]}", flush=True)
         if not code:
