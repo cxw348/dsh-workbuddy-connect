@@ -428,32 +428,46 @@ def try_once(seed, idx, port):
             print(f"  [otp] submitted={clicked}", flush=True)
             time.sleep(14)
 
-        # === 真登录态判据：直接访问只有登录用户能看的页面 ===
-        # 2026-11-21 教训：URL 停在 signup 不代表没建成；反过来跳到 /account_verifications
-        # 也不代表建成了（旧版就是因为没填对 OTP 而假成功）。
+        # === 真判据：用密码登录一次（2026-11-21 修正）===
+        # 教训：提交 OTP 后 GitHub 显示「Your account was created successfully!
+        # Please sign in to continue.」，此时浏览器并没有会话。旧判据直接 goto
+        # /settings/profile 必然看到 "Sign in to GitHub" → 被误判成
+        # OTP_SUBMITTED_UNVERIFIED。真正的判定必须走一次密码登录：
+        #   /suspended → SUSPENDED（账号建成即封）
+        #   dashboard  → ACCOUNT_LIVE
+        #   错误提示   → BAD_CREDENTIALS
         rec["url_after_otp"] = page.url
-        verified = False
         try:
-            page.goto("https://github.com/settings/profile", wait_until="commit")
-            time.sleep(4)
-            t = page.inner_text("body")[:4000]
-            rec["settings_url"] = page.url
-            rec["settings_len"] = len(t)
-            low = t.lower()
-            has_login = ("sign in to github" in low) or ("incorrect username" in low)
-            verified = (not has_login) and ("profile" in low or "public profile" in low
-                                            or "settings" in low)
-            rec["settings_head"] = t[:200]
+            rec["text_after_otp"] = page.inner_text("body")[:300]
+        except Exception:  # noqa: BLE001
+            pass
+        rec["created_msg"] = "created successfully" in (rec.get("text_after_otp") or "").lower()
+
+        verdict = "UNKNOWN"
+        try:
+            page.goto("https://github.com/login", wait_until="commit")
+            time.sleep(3)
+            if page.locator("input#login_field").count():
+                page.fill("input#login_field", email)
+                page.fill("input#password", pwd)
+                page.locator("input[name='commit'], button[type='submit']").first.click()
+                time.sleep(8)
+            rec["login_url"] = page.url
+            lt = page.inner_text("body")[:2500]
+            rec["login_text"] = lt[:600]
+            low = lt.lower()
+            if "/suspended" in page.url or "account suspended" in low:
+                verdict = "SUSPENDED"
+            elif "/dashboard" in page.url or "/settings" in page.url or "your profile" in low:
+                verdict = "ACCOUNT_LIVE"
+            elif "incorrect username or password" in low:
+                verdict = "BAD_CREDENTIALS"
+            elif "two-factor" in low or "verification" in low:
+                verdict = "NEED_2FA"
         except Exception as e:  # noqa: BLE001
-            rec["settings_err"] = f"{type(e).__name__}: {e}"
-        rec["verified_login"] = verified
+            rec["login_err"] = f"{type(e).__name__}: {e}"
+        rec["result"] = verdict
         rec["final_url"] = page.url
-        if verified:
-            rec["result"] = "ACCOUNT_LIVE"
-        elif rec.get("code_filled"):
-            rec["result"] = "OTP_SUBMITTED_UNVERIFIED"
-        else:
-            rec["result"] = "UNCONFIRMED"
         try:
             rec["final_text"] = page.inner_text("body")[:260]
         except Exception:  # noqa: BLE001
