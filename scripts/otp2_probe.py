@@ -58,11 +58,28 @@ def probe(idx):
             if pg.evaluate("() => {const b=document.querySelector('button.js-octocaptcha-form-submit');return b?b.disabled:null;}") is False: break
             time.sleep(2)
         pg.evaluate("() => document.querySelector('button.js-octocaptcha-form-submit').click()")
-        time.sleep(12)
-        n = pg.locator("input#launch-code-0, input[name='launch_code[]']").count()
-        print('  otp boxes=%d' % n, flush=True)
+        # 2026-11-21 实测：POST 之后 SPA 会先空白一段时间再渲染 8 格验证码。
+        # 固定 sleep 12s 会在慢出口上抓到空 body（otp2 首跑就栽在这），必须显式等 selector。
+        n = 0
+        for _ in range(30):                      # 最多等 90 秒
+            try:
+                n = pg.locator("input#launch-code-0, input[name='launch_code[]']").count()
+            except Exception:  # noqa: BLE001
+                n = 0
+            if n:
+                break
+            time.sleep(3)
+        rec['otp_wait_boxes'] = n
+        print('  otp boxes=%d url=%s' % (n, pg.url[:70]), flush=True)
+        try: pg.screenshot(path=os.path.join(OUT, f'landing{idx}.png'), full_page=True)
+        except Exception: pass
         if not n:
-            rec['result'] = 'NO_OTP_PAGE'; rec['text'] = pg.inner_text('body')[:300]; return rec
+            rec['result'] = 'NO_OTP_PAGE'
+            try: rec['text'] = pg.inner_text('body')[:600]
+            except Exception: rec['text'] = ''
+            rec['landing_url'] = pg.url
+            print('  landing_text=%r' % rec['text'][:200], flush=True)
+            return rec
         code, subj = G.wait_code(jwt, since=t_mail, timeout=150)
         rec['code'] = code
         print('  code=%s len=%d' % (code, len(code or '')), flush=True)
