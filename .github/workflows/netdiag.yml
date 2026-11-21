@@ -1,0 +1,30 @@
+name: netdiag
+on: { workflow_dispatch: {} }
+jobs:
+  d:
+    runs-on: ubuntu-latest
+    steps:
+      - name: env-proxy
+        run: env | grep -i proxy || echo "no proxy env"
+      - name: dns
+        run: |
+          getent hosts api.mail.tm || echo "dns fail api.mail.tm"
+          getent hosts github.com || true
+      - name: probe
+        run: |
+          for u in https://api.mail.tm/domains https://mail.tbrmail548.dpdns.org/open_api/settings https://api.github.com https://github.com/login; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$u" || echo CURLERR)
+            echo "$u -> $code"
+          done
+      - name: pyprobe
+        run: |
+          python3 - <<'PY'
+          import urllib.request, os
+          print('proxy env:', {k:v for k,v in os.environ.items() if 'proxy' in k.lower()})
+          for u in ['https://api.mail.tm/domains','https://mail.tbrmail548.dpdns.org/open_api/settings']:
+              try:
+                  with urllib.request.urlopen(u, timeout=20) as r:
+                      print(u, r.status, len(r.read()))
+              except Exception as e:
+                  print(u, 'ERR', repr(e)[:160])
+          PY
