@@ -76,86 +76,18 @@ VALIDITY_JS = """() => {
 
 
 # ---------------- mail ----------------
-MAILTM = "https://api.mail.tm"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
 
 
-def _jreq(url, data=None, token=None, method=None):
-    hdr = {"User-Agent": UA, "Accept": "application/json"}
-    body = None
-    if data is not None:
-        hdr["Content-Type"] = "application/json"
-        body = json.dumps(data).encode()
-    if token:
-        hdr["Authorization"] = "Bearer " + token
-    req = urllib.request.Request(url, data=body, headers=hdr, method=method)
-    for attempt in range(4):
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                raw = r.read()
-                return r.status, (json.loads(raw) if raw else {})
-        except urllib.error.HTTPError as e:
-            raw = e.read()
-            if e.code == 429:
-                time.sleep(8 + attempt * 5)
-                continue
-            try:
-                return e.code, json.loads(raw)
-            except Exception:  # noqa: BLE001
-                return e.code, {"raw": raw[:200].decode("utf-8", "replace")}
-        except Exception as e:  # noqa: BLE001
-            if attempt == 3:
-                raise
-            time.sleep(4)
-    return 0, {}
-
-
-def new_mailbox():
-    """mail.tm 建临时邮箱，返回 {address, jwt, password}。"""
-    st, dom = _jreq(MAILTM + "/domains?page=1")
-    if isinstance(dom, list):
-        doms = [m.get("domain") for m in dom if isinstance(m, dict)]
-    else:
-        doms = [m["domain"] for m in (dom.get("hydra:member") or [])]
-    domain = doms[0] if doms else "euploading.com"
-    pwd = "Wb!" + "".join(random.choices(string.ascii_letters + string.digits, k=12))
-    for _ in range(6):
-        addr = "gh" + "".join(random.choices(string.ascii_lowercase + string.digits, k=12)) + "@" + domain
-        st, r = _jreq(MAILTM + "/accounts", {"address": addr, "password": pwd})
-        if st in (200, 201):
-            st2, t = _jreq(MAILTM + "/token", {"address": addr, "password": pwd})
-            if st2 in (200, 201) and t.get("token"):
-                return {"address": addr, "jwt": t["token"], "password": pwd}
-        time.sleep(2)
-    raise RuntimeError("mail.tm 建箱失败")
-
-
-def wait_code(jwt, timeout=150, poll=4):
-    """等 GitHub launch code，返回 (code, subject)。锚点：6~8 位数字。"""
-    deadline = time.time() + timeout
-    seen = set()
-    while time.time() < deadline:
-        st, r = _jreq(MAILTM + "/messages?page=1", token=jwt)
-        if st == 200:
-            for m in (r.get("hydra:member") or r.get("messages") or []):
-                mid = m.get("id")
-                if not mid or mid in seen:
-                    continue
-                seen.add(mid)
-                st2, d = _jreq(MAILTM + "/messages/" + mid, token=jwt)
-                if st2 != 200:
-                    continue
-                subj = d.get("subject") or ""
-                body = d.get("text") or d.get("intro") or ""
-                for txt in (body, subj):
-                    for pat in (r"(\d{6})", r"(\d{8})",
-                                r"[Ll]aunch code[^0-9]{0,40}(\d{6,8})"):
-                        mt = re.search(pat, txt or "")
-                        if mt:
-                            return mt.group(1), subj
-        time.sleep(poll)
-    return None, ""
+def new_mailbox(prefix="gh"):
+    name = prefix + "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    body = json.dumps({"enablePrefix": True, "name": name, "domain": DOMAIN}).encode()
+    req = urllib.request.Request(
+        f"{MAIL}/api/new_address", data=body,
+        headers={"Content-Type": "application/json", "User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=40) as r:
+        return json.loads(r.read())
 
 
 def wait_code(jwt, since=0.0, timeout=180, poll=4):
@@ -193,50 +125,6 @@ def wait_code(jwt, since=0.0, timeout=180, poll=4):
 
 
 # ---------------- browser ----------------
-def open_form(page):
-    page.goto("https://github.com/", wait_until="commit")
-    time.sleep(5)
-    try:
-        page.goto("https://github.com/signup", wait_until="commit")
-    except Exception:  # noqa: BLE001
-        pass
-    time.sleep(3)
-    page.goto("https://github.com/", wait_until="commit")
-    time.sleep(4)
-    clicked = False
-    for sel in ("a[href*='/signup']", "a:has-text('Sign up')"):
-        try:
-            if page.locator(sel).count():
-                page.locator(sel).first.click()
-                clicked = True
-                break
-        except Exception:  # noqa: BLE001
-            continue
-    if not clicked:
-        return False
-    for _ in range(50):
-        try:
-            if page.locator("#email").count():
-                return True
-        except Exception:  # noqa: BLE001
-            pass
-        time.sleep(2)
-    return False
-
-
-def wait_email_ok(page, tries=8):
-    """GitHub 会异步校验邮箱，期间 validationMessage='Verifying…'。"""
-    for i in range(tries):
-        v = page.evaluate("""() => {
-            const e=document.querySelector('input[name="user[email]"]');
-            if(!e) return {ok:false, msg:'no-input'};
-            return {ok:e.checkValidity(), msg:e.validationMessage||''};
-        }""")
-        if v.get("ok"):
-            return True, v.get("msg", "")
-        print(f"    [email] {v.get('msg')!r} retry {i+1}/{tries}", flush=True)
-        time.sleep(3)
-    return False, v.get("msg", "")
 
 
 def try_once(seed, idx, port):
